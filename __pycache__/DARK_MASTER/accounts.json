@@ -1,0 +1,42 @@
+[
+  {
+    "uid": "8199240048",
+    "password": "AC0C4EFF114B3EC9AE106F37E60CE2167B5E940037BAC8E08B26162F7596F4B5",
+    "name": "gojole436017",
+    "account_id": "18656043360",
+    "region": "IND",
+    "created_at": "2026-10-13 22:11:00"
+  },
+  {
+    "uid": "8199240340",
+    "password": "A4BD6450F6265735CB16897CE06DD3A30F0E2866C8547B8D2D928E0A4576D628",
+    "name": "gojole601434",
+    "account_id": "18656043473",
+    "region": "IND",
+    "created_at": "2026-10-13 22:11:01"
+  },
+  {
+    "uid": "8199240920",
+    "password": "0307009F83CBE19C9FD4887626B0E9EC3CF4F35203A31E69121A86648BB7BCEE",
+    "name": "gojole164541",
+    "account_id": "18656043587",
+    "region": "IND",
+    "created_at": "2026-10-13 22:11:01"
+  },
+  {
+    "uid": "8199241398",
+    "password": "475E40831149230345DD1077A1F0ECFEFC725B12D9BC55C5C093E887F4E82A55",
+    "name": "gojole478885",
+    "account_id": "18656044072",
+    "region": "IND",
+    "created_at": "2026-10-13 22:11:01"
+  },
+  {
+    "uid": "8199241682",
+    "password": "FE29EC677B065D7FD2F95BD9011BAAAEC2768AFB4228B9A5ED41C1D287956AB7",
+    "name": "gojole923538",
+    "account_id": "18656044196",
+    "region": "IND",
+    "created_at": "2026-10-13 22:11:01"
+  }
+]

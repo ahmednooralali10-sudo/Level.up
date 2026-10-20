@@ -1,0 +1,93 @@
+{
+  "8167969689": {
+    "unique_device_id": "Google|e19b3463-3064-42c4-b444-b4848a578f12",
+    "brand": "OPPO",
+    "model": "CPH2611",
+    "gpu_renderer": "Adreno (TM) 720",
+    "system_software": "Android OS 14 / API-34",
+    "screen_width": 1080,
+    "screen_height": 2400,
+    "screen_dpi": "417",
+    "memory": 2825,
+    "processor_details": "ARM64 FP ASIMD AES VMH | 2267 | 6",
+    "client_ip": "178.82.12.155"
+  },
+  "8167973196": {
+    "unique_device_id": "Google|216cb9ae-6ba5-47e8-97cd-3dffb67bf4ae",
+    "brand": "Poco",
+    "model": "M2102J20SG",
+    "gpu_renderer": "Adreno (TM) 660",
+    "system_software": "Android OS 13 / API-33",
+    "screen_width": 1280,
+    "screen_height": 1600,
+    "screen_dpi": "390",
+    "memory": 5159,
+    "processor_details": "ARM64 FP ASIMD AES VMH | 2515 | 7",
+    "client_ip": "168.120.28.176"
+  },
+  "8167975885": {
+    "unique_device_id": "Google|3673032e-2e09-40a3-86e1-3207f20a3050",
+    "brand": "OnePlus",
+    "model": "CPH2451",
+    "gpu_renderer": "Adreno (TM) 740",
+    "system_software": "Android OS 13 / API-33",
+    "screen_width": 1080,
+    "screen_height": 2400,
+    "screen_dpi": "370",
+    "memory": 3466,
+    "processor_details": "ARM64 FP ASIMD AES VMH | 2530 | 10",
+    "client_ip": "117.135.236.210"
+  },
+  "8186728486": {
+    "unique_device_id": "Google|48d595a8-73dd-4bda-8e93-18d3c7804c6b",
+    "brand": "OPPO",
+    "model": "CPH2611",
+    "gpu_renderer": "Adreno (TM) 720",
+    "system_software": "Android OS 14 / API-34",
+    "screen_width": 720,
+    "screen_height": 3200,
+    "screen_dpi": "370",
+    "memory": 5371,
+    "processor_details": "ARM64 FP ASIMD AES | 2616 | 9",
+    "client_ip": "152.21.144.182"
+  },
+  "8186728426": {
+    "unique_device_id": "Google|36e47927-a336-4e7e-b4f2-62ec087963e1",
+    "brand": "OPPO",
+    "model": "CPH2611",
+    "gpu_renderer": "Adreno (TM) 720",
+    "system_software": "Android OS 14 / API-34",
+    "screen_width": 1440,
+    "screen_height": 3200,
+    "screen_dpi": "313",
+    "memory": 5337,
+    "processor_details": "ARM64 FP ASIMD AES | 2838 | 10",
+    "client_ip": "166.191.87.230"
+  },
+  "8186728471": {
+    "unique_device_id": "Google|caa1558c-a47b-485c-9b45-966fb54d44eb",
+    "brand": "OnePlus",
+    "model": "CPH2451",
+    "gpu_renderer": "Adreno (TM) 740",
+    "system_software": "Android OS 13 / API-33",
+    "screen_width": 1080,
+    "screen_height": 1600,
+    "screen_dpi": "367",
+    "memory": 3049,
+    "processor_details": "ARM64 FP ASIMD AES | 2251 | 9",
+    "client_ip": "204.67.148.41"
+  },
+  "8186728446": {
+    "unique_device_id": "Google|93dfddc8-ffef-41c6-9302-c1ac4ad04ec8",
+    "brand": "OPPO",
+    "model": "CPH2611",
+    "gpu_renderer": "Adreno (TM) 720",
+    "system_software": "Android OS 14 / API-34",
+    "screen_width": 720,
+    "screen_height": 1600,
+    "screen_dpi": "366",
+    "memory": 6314,
+    "processor_details": "ARM64 FP ASIMD AES | 2754 | 12",
+    "client_ip": "130.59.248.12"
+  }
+}

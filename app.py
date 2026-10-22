@@ -1,11 +1,15 @@
 # -*- coding: utf-8 -*-
 # ═══════════════════════════════════════════════════════════════════
-#  TEAM RBC — Squad Bot (Group Auto-Join & Permanent Reconnect Fix)
+#  TEAM RBC — Squad Bot (Full Version + Web UI)
 # ═══════════════════════════════════════════════════════════════════
 import sys, asyncio, httpx, random, json, socket, struct, time, os, uuid
 import itertools, secrets, traceback, base64, math
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple, Any
+
+from fastapi import FastAPI, Form
+from fastapi.responses import HTMLResponse, JSONResponse
+import uvicorn
 
 if sys.platform == "win32":
     try:
@@ -22,12 +26,10 @@ from message_ids import MESSAGE_ID_TO_NAME
 import RbcTeam_pb2
 import RbcFF_pb2
 import thunderFF_pb2
-
-from dashboard_server import bot_state, start_web_dashboard
+import CguFF_pb2
 
 # ═══════════════════════════ CONFIG ═══════════════════════════
-WEB_HOST = "0.0.0.0"
-WEB_PORT = 20333
+WEB_PORT = int(os.environ.get("PORT", 8000))
 ACCOUNTS_FILE = "accounts.json"
 TOKEN_CACHE_FILE = "token_cache.json"
 DEVICES_FILE = "devices.json"
@@ -42,7 +44,6 @@ EXP_REFRESH_AFTER_MATCH_DELAY = 9.0
 MAX_CONSECUTIVE_PARSE_FAILURES = 5
 NON_MATCH_RECONNECT_DELAY      = 1.0
 
-# Battle Royale Config
 BR_MODE_ID             = 1
 BR_MAP_ID              = 1
 
@@ -69,17 +70,12 @@ MOVEMENT_TICK_MS            = 240
 MOVEMENT_RADIUS             = 180
 MOVEMENT_UPDATE_SPEED_EVERY = 4.0
 
-# Disabled to prevent in-game network cuts/ping failures
 ENABLE_HTTP_PING = False
 PING_INTERVAL    = 15.0
 PING_TIMEOUT     = 8.0
 PING_URL         = "https://loginbp.ppmainecoonghj.com/Ping"
 PING_REAL_IP     = "103.109.214.211"
 
-FALLBACK_UID = ""
-FALLBACK_PASSWORD = ""
-
-# ═══════════════════════════ SQUAD CONFIG ═══════════════════════════
 TEAM_MODE               = True
 TEAM_SIZE               = 4
 TEAM_PEER_WAIT_TIMEOUT  = 120.0
@@ -94,7 +90,46 @@ TEAM_READY_DELAY        = 3.0
 _accept_friend_request  = True
 DEBUG_TEAM_PACKETS      = True
 
-# ═══════════════════════════ SQUAD MATCH SYNC & FILE CLEANUP ═══════════════════════════
+# ═══════════════════════════ BOT STATE ═══════════════════════════
+class BotState:
+    def __init__(self):
+        self.account_workers = {}
+        self.account_credentials = {}
+        self.accounts = {}
+        self.refresh_callbacks = {}
+        self.paused = set()
+        self.logs = []
+
+    def log(self, msg, level="info"):
+        print(f"[{level.upper()}] {msg}")
+        self.logs.append({"t": time.strftime("%H:%M:%S"), "level": level, "msg": msg})
+        del self.logs[200:]
+
+    def update_status(self, uid, status, matches=0):
+        if uid not in self.accounts: self.accounts[uid] = {}
+        self.accounts[uid]["status"] = status
+        self.accounts[uid]["matches"] = matches
+
+    def is_paused(self, uid): return uid in self.paused
+
+    def update_exp(self, uid, exp, level):
+        if uid not in self.accounts: self.accounts[uid] = {}
+        self.accounts[uid]["exp"] = exp
+        self.accounts[uid]["level"] = level
+
+    def increment_match(self, uid):
+        if uid not in self.accounts: self.accounts[uid] = {}
+        self.accounts[uid]["matches"] = self.accounts[uid].get("matches", 0) + 1
+
+    def register_account(self, uid, nickname, region, level, exp, likes):
+        self.accounts[uid] = {
+            "nickname": nickname, "region": region, "level": level,
+            "exp": exp, "likes": likes, "status": "ONLINE", "matches": self.accounts.get(uid, {}).get("matches", 0)
+        }
+
+bot_state = BotState()
+
+# ═══════════════════════════ SQUAD SYNC ═══════════════════════════
 class SquadMatchSync:
     def __init__(self):
         self.lock = asyncio.Lock()
@@ -117,7 +152,7 @@ class SquadMatchSync:
                 alive_left = len(self.active_squad_uids) - len(self.dead_squad_uids)
                 print_warning(f"[SQUAD SYNC] Bot {uid} DEAD. Alive bots remaining: {alive_left}")
                 if len(self.dead_squad_uids) >= len(self.active_squad_uids):
-                    print_success("[SQUAD SYNC] ALL 4 BOTS ARE DEAD! Exiting game together.")
+                    print_success("[SQUAD SYNC] ALL BOTS ARE DEAD! Exiting game together.")
                     self.all_dead_event.set()
 
     async def wait_for_all_dead(self, timeout=360.0):
@@ -135,15 +170,12 @@ def purge_extra_accounts_from_file(keep_uids: set):
         with open(ACCOUNTS_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
         if isinstance(data, list):
-            filtered = [
-                acc for acc in data 
-                if str(acc.get("uid", "")) in keep_uids_str or str(acc.get("account_id", "")) in keep_uids_str
-            ]
+            filtered = [acc for acc in data if str(acc.get("uid", "")) in keep_uids_str or str(acc.get("account_id", "")) in keep_uids_str]
             with open(ACCOUNTS_FILE, "w", encoding="utf-8") as f:
                 json.dump(filtered, f, indent=2)
-            print_success(f"[CLEANUP] Extra accounts purged from {ACCOUNTS_FILE}! Kept {len(filtered)} group accounts.")
+            print_success(f"[CLEANUP] Extra accounts purged. Kept {len(filtered)} accounts.")
     except Exception as e:
-        print_error(f"[CLEANUP] Failed to purge accounts file: {e}")
+        print_error(f"[CLEANUP] Failed to purge: {e}")
 
 # ═══════════════════════════ ANTI-BAN ═══════════════════════════
 def bypass_jitter(base, spread=0.35):
@@ -201,7 +233,7 @@ def get_device_for_account(account_identifier):
     except Exception: pass
     return dev
 
-# ═══════════════════════════ DNS ═══════════════════════════
+# ═══════════════════════════ DNS / SOCKET ═══════════════════════════
 _DNS_CACHE: Dict[str, Tuple[str, float]] = {}
 _DNS_CACHE_TTL = 300.0
 
@@ -227,12 +259,9 @@ def optimize_tcp_socket(sock):
     try:
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-        if hasattr(socket, "TCP_KEEPIDLE"):
-            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 3)
-        if hasattr(socket, "TCP_KEEPINTVL"):
-            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 3)
-        if hasattr(socket, "TCP_KEEPCNT"):
-            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
+        if hasattr(socket, "TCP_KEEPIDLE"): sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 3)
+        if hasattr(socket, "TCP_KEEPINTVL"): sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 3)
+        if hasattr(socket, "TCP_KEEPCNT"): sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 65536)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 65536)
     except Exception: pass
@@ -275,7 +304,7 @@ _ROUNDS = 16
 _FIELD_SIZES = {0:1, 1:2, 2:2, 3:1, 4:2}
 _FIELD_NAMES = {0:"sendOption", 1:"cmd", 2:"orderId", 3:"flags", 4:"length"}
 
-# ═══════════════════════════ LOG ═══════════════════════════
+# ═══════════════════════════ LOGGING ═══════════════════════════
 class Colors:
     GREEN='\033[92m'; FAIL='\033[91m'; WARNING='\033[93m'
     CYAN='\033[96m'; MAGENTA='\033[95m'; WHITE='\033[97m'; ENDC='\033[0m'
@@ -285,24 +314,16 @@ def print_colored(t, c=Colors.WHITE):
     except Exception: pass
 
 def print_success(t):
-    print_colored(f"[+] {t}", Colors.GREEN)
-    try: bot_state.log(t, "success")
-    except Exception: pass
+    print_colored(f"[+] {t}", Colors.GREEN); bot_state.log(t, "success")
 
 def print_error(t):
-    print_colored(f"[-] {t}", Colors.FAIL)
-    try: bot_state.log(t, "error")
-    except Exception: pass
+    print_colored(f"[-] {t}", Colors.FAIL); bot_state.log(t, "error")
 
 def print_warning(t):
-    print_colored(f"[!] {t}", Colors.WARNING)
-    try: bot_state.log(t, "warning")
-    except Exception: pass
+    print_colored(f"[!] {t}", Colors.WARNING); bot_state.log(t, "warning")
 
 def print_info(t):
-    print_colored(f"[i] {t}", Colors.CYAN)
-    try: bot_state.log(t, "info")
-    except Exception: pass
+    print_colored(f"[i] {t}", Colors.CYAN); bot_state.log(t, "info")
 
 def get_proto_field(d, key, default=None):
     if not d or not isinstance(d, dict): return default
@@ -312,7 +333,7 @@ def get_proto_field(d, key, default=None):
         v = d[str(key)].get('data'); return v if v is not None else default
     return default
 
-# ═══════════════════════════ MATCH COUNTER ═══════════════════════════
+# ═══════════════════════════ MATCH COUNTERS ═══════════════════════════
 _match_counters: Dict[str, int] = {}
 _match_counter_lock = asyncio.Lock()
 
@@ -323,8 +344,7 @@ async def _inc_match(uid):
 
 async def _dec_match(uid):
     async with _match_counter_lock:
-        if uid in _match_counters and _match_counters[uid] > 0:
-            _match_counters[uid] -= 1
+        if uid in _match_counters and _match_counters[uid] > 0: _match_counters[uid] -= 1
         return _match_counters.get(uid, 0)
 
 async def _get_match_count(uid):
@@ -335,15 +355,10 @@ async def _get_total_match_count():
     async with _match_counter_lock:
         return sum(_match_counters.values())
 
-# ═══════════════════════════ SQUAD STATE ═══════════════════════════
+# ═══════════════════════════ TEAM STATE ═══════════════════════════
 _team_state = {
-    "peers": {},
-    "leader_uid": None,
-    "team_code": None,
-    "pk_code": None,
-    "members": set(),
-    "members_lock": asyncio.Lock(),
-    "lock": asyncio.Lock(),
+    "peers": {}, "leader_uid": None, "team_code": None, "pk_code": None, "members": set(),
+    "members_lock": asyncio.Lock(), "lock": asyncio.Lock(),
 }
 
 async def _team_member_join(uid):
@@ -398,8 +413,7 @@ def _json_deserializer(obj):
 def _load_token_cache():
     global _token_cache_memo, _token_cache_memo_time
     now = time.time()
-    if _token_cache_memo and (now - _token_cache_memo_time) < _TOKEN_CACHE_MEMO_TTL:
-        return _token_cache_memo
+    if _token_cache_memo and (now - _token_cache_memo_time) < _TOKEN_CACHE_MEMO_TTL: return _token_cache_memo
     if not os.path.exists(TOKEN_CACHE_FILE): return {}
     try:
         with open(TOKEN_CACHE_FILE, "r", encoding="utf-8") as f:
@@ -587,7 +601,7 @@ def _decode_proto_manual(data):
         else: break
     return result
 
-# ═══════════════════════════ MANUAL PROTOBUF ENCODE ═══════════════════════════
+# ═══════════════════════════ PROTOBUF ENCODE ═══════════════════════════
 def encode_varint(n):
     if n < 0: return b''
     out = bytearray()
@@ -612,13 +626,11 @@ def build_proto(fields):
     return b''.join(parts)
 
 def encrypt_api(plain_hex):
-    return AES.new(AES_KEY, AES.MODE_CBC, AES_IV).encrypt(
-        pad(bytes.fromhex(plain_hex), AES.block_size)).hex()
+    return AES.new(AES_KEY, AES.MODE_CBC, AES_IV).encrypt(pad(bytes.fromhex(plain_hex), AES.block_size)).hex()
 
 def encrypt_api_bytes(plain_bytes):
     return AES.new(AES_KEY, AES.MODE_CBC, AES_IV).encrypt(pad(plain_bytes, AES.block_size))
 
-# ═══════════════════════════ SQUAD PROTOBUF BUILDERS ═══════════════════════════
 def _pb_varint(fn, val): return encode_varint((fn << 3) | 0) + encode_varint(val)
 def _pb_length(fn, val):
     enc = val.encode('utf-8') if isinstance(val, str) else val
@@ -632,8 +644,7 @@ def create_proto(fields):
             packet.extend(_pb_length(field, bytes(create_proto(value))))
         elif isinstance(value, list):
             for item in value:
-                if isinstance(item, dict):
-                    packet.extend(_pb_length(field, bytes(create_proto(item))))
+                if isinstance(item, dict): packet.extend(_pb_length(field, bytes(create_proto(item))))
                 elif isinstance(item, str): packet.extend(_pb_length(field, item))
                 elif isinstance(item, (bytes, bytearray)): packet.extend(_pb_length(field, bytes(item)))
                 elif isinstance(item, bool): packet.extend(_pb_varint(field, 1 if item else 0))
@@ -655,7 +666,7 @@ def create_packet(Pk, N, K, V):
     if pad_len < 0: pad_len = 0
     return bytes.fromhex(N + ('0' * pad_len) + hexlen + PkEnc)
 
-# ═══════════ SQUAD PACKETS ═══════════
+# ═══════════════════════════ SQUAD PACKETS ═══════════════════════════
 def create_team(key, iv, game_version="1.132.9"):
     fields = {
         1: 1, 2: {2: bytes.fromhex("01"), 3: 1, 4: 3, 5: "en",
@@ -695,7 +706,7 @@ def start_match_team(account_id, key, iv, region="ID"):
 def ready_for_game(uid, key, iv):
     return create_packet(create_proto({1: 15, 2: {1: uid, 2: 1}}).hex(), "0519", key, iv)
 
-# ═══════════════════════════ MAJORLOGIN / GETLOGIN ═══════════════════════════
+# ═══════════════════════════ MAJOR LOGIN ═══════════════════════════
 async def build_majorlogin_payload(open_id, access_token, platform, client_version, dev):
     try:
         p = {
@@ -703,8 +714,7 @@ async def build_majorlogin_payload(open_id, access_token, platform, client_versi
             7: str(client_version) if client_version else "1.132.8",
             8: str(dev.get("system_software", "Android OS 14 / API-34")),
             9: "Handheld", 10: "Telkomsel", 11: "CarrierDataNetwork",
-            12: str(dev.get("screen_width", 1639)),
-            13: str(dev.get("screen_height", 720)),
+            12: str(dev.get("screen_width", 1639)), 13: str(dev.get("screen_height", 720)),
             14: str(dev.get("screen_dpi", 320)),
             15: str(dev.get("processor_details", "ARM64 FP ASIMD AES | 2000 | 8")),
             16: str(dev.get("memory", 5653)),
@@ -716,8 +726,7 @@ async def build_majorlogin_payload(open_id, access_token, platform, client_versi
             25: str(dev.get("model", "Xiaomi")), 26: "ID",
             29: str(access_token), 30: "1", 41: "Telkomsel", 42: "4G",
             57: "7428b253defc164018c604a1ebbfebdf", 60: "109278", 61: "55402",
-            62: "868", 64: "55927", 65: "109278", 66: "55927", 67: "109278",
-            73: 2,
+            62: "868", 64: "55927", 65: "109278", 66: "55927", 67: "109278", 73: 2,
             74: "/data/app/~~6Cw028g_ld-8Z0z2qhrOLA==/com.dts.freefireth-i3wiaEmpx8CbiRVhUMx_ag==/lib/arm64",
             76: 1,
             77: "b8e0cd5e295eee42f5860d3c86e483dd|/data/app/~~6Cw028g_ld-8Z0z2qhrOLA==/com.dts.freefireth-i3wiaEmpx8CbiRVhUMx_ag==/base.apk",
@@ -725,8 +734,7 @@ async def build_majorlogin_payload(open_id, access_token, platform, client_versi
             86: "OpenGLES2", 87: 3071, 88: 4, 89: 14466, 93: "3rd_party",
             94: "KqsHTyb7yHjsAiyNWUUZa0DSOD6U0AhDQ76smAo1WeHHHpSmJ8KMRyRrxb2ttgJqO9YOqO/K6AORAvDMAX/qBS8+JahIkrM7kHfzlfULbgRAoZ9r",
             95: "111207", 96: "{\"cur_rate\":[60,90,120],\"support_etc2\":true}", 97: "1",
-            98: "1", 99: str(platform), 100: str(platform),
-            103: "1", 104: "52837", 105: "1",
+            98: "1", 99: str(platform), 100: str(platform), 103: "1", 104: "52837", 105: "1",
             106: "https://dl.gmc.freefiremobile.com/live/ABHotUpdates/|211c933168f55902c7dfbfd8c4e2957d",
             107: "1.3fb8adbf45f44ce9",
         }
@@ -755,8 +763,7 @@ async def send_majorlogin(data, release_version, server_url):
 async def send_getlogin(data, base_url, token, release_version):
     try:
         url = f"{base_url.rstrip('/')}/GetLoginData"
-        hdrs = headers.copy()
-        hdrs["ReleaseVersion"] = release_version
+        hdrs = headers.copy(); hdrs["ReleaseVersion"] = release_version
         hdrs['Authorization'] = f"Bearer {token}"
         hdrs['Host'] = "clientbp.ppmainecoonghj.com"
         r = await client.post(url, headers=hdrs, data=data)
@@ -843,7 +850,7 @@ async def send_keep_alive(region="ID"):
     except Exception:
         return bytes.fromhex("0219")
 
-# ═══════════════════════════ MATCH SEARCH PACKETS ═══════════════════════════
+# ═══════════════════════════ BR PACKET ═══════════════════════════
 BR_HEX = (
     "080112800a0a010110013a110a044944433110aa011a064555524f50453a100a044944433210311a064555524f5045"
     "40014a0801090a0b1219202758016291090a80013038384638324246303241393637363730323031303130303030"
@@ -1162,7 +1169,7 @@ async def build_match_startup_packets(token, udp_key, match_code, account_id, bl
     loading = await sv_frame(0x5A, match_code, 2, 448, 1, 1, tg, udp_key)
     return process.hex(), loading.hex()
 
-# ═══════════════════════════ MOVEMENT 2001 (FIXED FOR FULL BR MAP MOVEMENT) ═══════════════════════════
+# ═══════════════════════════ MOVEMENT ═══════════════════════════
 async def build_movement_packet_2001(key_bytes, msg_key, player_state, x, y, z,
                                      tick, counter, move_state, account_uid,
                                      room_code, phase="game"):
@@ -1198,10 +1205,8 @@ class MovementTracker:
     PLAYER_STATE = {"idle": 0, "walk": 1, "run": 2, "sprint": 3, "jump": 4, "crouch": 5, "prone": 6}
 
     def __init__(self, pattern="circle", radius=180):
-        self.pattern = pattern
-        self.radius = int(radius)
-        self.tick = 0
-        self.counter = 0
+        self.pattern = pattern; self.radius = int(radius)
+        self.tick = 0; self.counter = 0
         self.angle = random.uniform(0, 6.2832)
         self.speed_multiplier = 1.0
         self.curr_x = random.randint(-400, 400)
@@ -1414,7 +1419,7 @@ async def play_game(server_ip_port, thunder, sharma, udp_key, match_code,
             except Exception: await asyncio.sleep(0.5); continue
             if ack_state == "ready_to_send_thunder" and not thunder_sent:
                 await start_startup_safe(send_startup)
-        
+
         print_info(f"[MATCH #{match_index}] Bot {uid_str} waiting for remaining alive squad bots...")
         await squad_sync.wait_for_all_dead()
         print_success(f"[MATCH #{match_index}] Bot {uid_str} proceeding back to lobby after full squad death!")
@@ -1457,7 +1462,7 @@ async def start_startup_safe(fn):
     try: await fn()
     except Exception: pass
 
-# ═══════════════════════════ FRIEND REQUEST ═══════════════════════════
+# ═══════════════════════════ SOCIAL PACKETS ═══════════════════════════
 async def _process_social_packet(raw_bytes, account_data, tag="MAIN"):
     try:
         hex_data = raw_bytes.hex()
@@ -1638,7 +1643,294 @@ async def _handle_team_invite(hex_data, pl, uid_str, current_account_data,
         print_warning(f"[TEAM-IN {uid_str}] error: {e}")
         return False
 
-# ═══════════════════════════ FUNCTIONAL (MAIN) — BATTLE ROYALE ONLY ═══════════════════════════
+# ═══════════════════════════ INFORMATIONAL ═══════════════════════════
+async def informational(addrs, starter_packet, key, iv, region="ID", max_reconnects=999999):
+    ip, port = addrs.split(":")
+    while True:
+        writer = None; ping_task = None
+        try:
+            rip = await resolve_host_cloudflare(ip)
+            reader, writer = await asyncio.open_connection(rip, int(port))
+            rs = writer.get_extra_info('socket')
+            if rs: optimize_tcp_socket(rs)
+            writer.write(bytes.fromhex(starter_packet)); await writer.drain()
+            async def info_ka():
+                ka = await send_keep_alive(region)
+                while True:
+                    await asyncio.sleep(2.0)
+                    try:
+                        if writer and not writer.is_closing():
+                            writer.write(ka); await writer.drain()
+                    except Exception: break
+            ping_task = asyncio.create_task(info_ka())
+            while True:
+                data = await reader.read(8192)
+                if not data: raise ConnectionError("closed")
+        except asyncio.CancelledError:
+            if ping_task: ping_task.cancel()
+            if writer:
+                try: writer.close(); await writer.wait_closed()
+                except Exception: pass
+            raise
+        except Exception:
+            if ping_task: ping_task.cancel()
+            if writer:
+                try: writer.close(); await writer.wait_closed()
+                except Exception: pass
+            await asyncio.sleep(2.0)
+
+# ═══════════════════════════ ACCOUNT HELPERS ═══════════════════════════
+def _register_credentials(ad):
+    try:
+        acc_id = str(ad['account_id'])
+        bot_state.account_credentials[acc_id] = ad
+        if ad.get('auth_uid'): bot_state.account_credentials[str(ad['auth_uid'])] = ad
+        if ad.get('auth_token'): bot_state.account_credentials[f"tok_{ad['auth_token'][:20]}"] = ad
+    except Exception: pass
+
+async def refresh_account_profile(ad_or_uid):
+    try:
+        if isinstance(ad_or_uid, str):
+            uid = str(ad_or_uid); ad = bot_state.account_credentials.get(uid)
+        else:
+            ad = ad_or_uid; uid = str(ad.get('account_id')) if ad else "?"
+        if not ad: return
+        url = ad.get('server_url'); token = ad.get('token')
+        rel = ad.get('release_version'); payload = ad.get('login_payload_data')
+        if not (url and token and rel and payload): return
+        res = await send_getlogin(payload, url, token, rel)
+        if not res: return
+        rp, dd = res
+        def _si(v, d):
+            try:
+                if v is None or v == "": return d
+                return int(v)
+            except Exception: return d
+        level = _si(get_proto_field(dd, 6, None), None)
+        exp = _si(get_proto_field(dd, 7, None), None)
+        likes = _si(get_proto_field(dd, 8, None), None)
+        try: nick = rp.nickname or get_proto_field(dd, 4, "") or ""
+        except Exception: nick = ""
+        if level is None and exp is None: return
+        level = level if level is not None else 1
+        exp = exp if exp is not None else 0
+        likes = likes if likes is not None else 0
+        acc_id = str(ad['account_id'])
+        try: bot_state.update_exp(acc_id, exp, level)
+        except Exception: pass
+        if likes > 0 and acc_id in bot_state.accounts:
+            bot_state.accounts[acc_id]["likes"] = likes
+        if nick and acc_id in bot_state.accounts:
+            bot_state.accounts[acc_id]["nickname"] = nick
+        _update_cache_profile(ad, level, exp)
+        ad['level'] = level; ad['exp'] = exp
+        if likes > 0: ad['likes'] = likes
+        if nick: ad['nickname'] = nick
+    except Exception: pass
+
+async def process_account_uid_pass(uid, password):
+    cached = cache_get(uid)
+    if cached:
+        print_success(f"[CACHE] {uid} loaded")
+        acc_id = str(cached['account_id'])
+        bot_state.register_account(uid=acc_id,
+            nickname=cached.get('nickname', f"Player_{acc_id}"),
+            region=cached.get('region', 'ID'),
+            level=cached.get('level', 1), exp=cached.get('exp', 0),
+            likes=cached.get('likes', 0))
+        _register_credentials(cached); return cached
+    print_info(f"[LOGIN] UID {uid}...")
+    try:
+        vc = await version_config()
+        if not vc: return None
+        rel, cv, su = vc
+        tg = await get_access_token(uid, password)
+        if not tg: return None
+        oid, at, pf = tg
+        dev = get_device_for_account(uid)
+        lpd = await build_majorlogin_payload(oid, at, pf, cv, dev)
+        if not lpd: return None
+        mresp = await send_majorlogin(lpd, rel, su)
+        if mresp is None: return None
+        gl = await send_getlogin(lpd, mresp.url, mresp.token, rel)
+        if gl is None: return None
+        rp, dd = gl
+        acc_id = str(mresp.account_id)
+        level = int(get_proto_field(dd, 6, 1) or 1)
+        exp = int(get_proto_field(dd, 7, 0) or 0)
+        likes = int(get_proto_field(dd, 8, 0) or 0)
+        nick = rp.nickname or get_proto_field(dd, 4, f"Player_{acc_id}")
+        region = mresp.region or get_proto_field(dd, 3, "ID")
+        bot_state.register_account(uid=acc_id, nickname=nick, region=region,
+                                    level=level, exp=exp, likes=likes)
+        print_success(f"[OK] {acc_id} | {nick} | Lvl{level} | BATTLE ROYALE")
+        ad = {
+            'account_id': mresp.account_id, 'nickname': nick, 'region': region,
+            'level': level, 'exp': exp, 'likes': likes,
+            'open_id': oid, 'access_token': at, 'platform': str(pf),
+            'token': mresp.token, 'server_time': mresp.server_time,
+            'aes_ak': mresp.aes_ak, 'iv_i': mresp.iv_i,
+            'functional_addrs': rp.functional_addrs or get_proto_field(dd, 14),
+            'informational_addrs': rp.informational_addrs or get_proto_field(dd, 32),
+            'release_version': rel, 'client_version': cv, 'server_url': mresp.url,
+            'login_payload_data': lpd,
+            'auth_type': 'guest', 'auth_uid': uid, 'auth_password': password,
+        }
+        _register_credentials(ad); cache_set(uid, ad); return ad
+    except Exception as e:
+        print_error(f"process_account_uid_pass: {e}")
+        return None
+
+async def process_account_token(access_token):
+    cache_key = f"tok_{access_token[:20]}"
+    cached = cache_get(cache_key)
+    if cached:
+        acc_id = str(cached['account_id'])
+        bot_state.register_account(uid=acc_id,
+            nickname=cached.get('nickname', f"Player_{acc_id}"),
+            region=cached.get('region', 'ID'),
+            level=cached.get('level', 1), exp=cached.get('exp', 0),
+            likes=cached.get('likes', 0))
+        _register_credentials(cached); return cached
+    print_info("[LOGIN] Token...")
+    try:
+        vc = await version_config()
+        if not vc: return None
+        rel, cv, su = vc
+        import requests
+        url = f"https://100067.connect.garena.com/oauth/token/inspect?token={access_token}"
+        hdrs = {"User-Agent": "GarenaMSDK/4.0.19P4(G011A ;Android 9;en;US;)"}
+        resp = await asyncio.to_thread(requests.get, url, headers=hdrs, timeout=10)
+        d = resp.json()
+        if 'error' in d: return None
+        oid = d.get('open_id'); pf = d.get('platform', 4)
+        if not oid: return None
+        dev = get_device_for_account(oid)
+        lpd = await build_majorlogin_payload(oid, access_token, str(pf), cv, dev)
+        if not lpd: return None
+        mresp = await send_majorlogin(lpd, rel, su)
+        if mresp is None: return None
+        gl = await send_getlogin(lpd, mresp.url, mresp.token, rel)
+        if gl is None: return None
+        rp, dd = gl
+        acc_id = str(mresp.account_id)
+        level = int(get_proto_field(dd, 6, 1) or 1)
+        exp = int(get_proto_field(dd, 7, 0) or 0)
+        likes = int(get_proto_field(dd, 8, 0) or 0)
+        nick = rp.nickname or get_proto_field(dd, 4, f"Player_{acc_id}")
+        region = mresp.region or get_proto_field(dd, 3, "ID")
+        bot_state.register_account(uid=acc_id, nickname=nick, region=region,
+                                    level=level, exp=exp, likes=likes)
+        ad = {
+            'account_id': mresp.account_id, 'nickname': nick, 'region': region,
+            'level': level, 'exp': exp, 'likes': likes,
+            'open_id': oid, 'access_token': access_token, 'platform': str(pf),
+            'token': mresp.token, 'server_time': mresp.server_time,
+            'aes_ak': mresp.aes_ak, 'iv_i': mresp.iv_i,
+            'functional_addrs': rp.functional_addrs or get_proto_field(dd, 14),
+            'informational_addrs': rp.informational_addrs or get_proto_field(dd, 32),
+            'release_version': rel, 'client_version': cv, 'server_url': mresp.url,
+            'login_payload_data': lpd,
+            'auth_type': 'token', 'auth_token': access_token,
+        }
+        _register_credentials(ad); cache_set(cache_key, ad); return ad
+    except Exception as e:
+        print_error(f"process_account_token: {e}"); return None
+
+async def run_account_worker(ad, label):
+    acc_id = str(ad['account_id'])
+    info_task = None; exp_task = None; ping_task = None
+    try:
+        reg = ad.get('region', 'ID')
+        tcp_online = await build_tcp_startup_packet(
+            ad['account_id'], ad['token'], ad['server_time'],
+            ad['aes_ak'], ad['iv_i'], region=reg, typ='OnLine')
+        tcp_chat = await build_tcp_startup_packet(
+            ad['account_id'], ad['token'], ad['server_time'],
+            ad['aes_ak'], ad['iv_i'], region=reg, typ='ChaT')
+        info_task = asyncio.create_task(informational(ad['informational_addrs'], tcp_chat,
+                                                      ad['aes_ak'], ad['iv_i'], region=reg))
+        if ENABLE_HTTP_PING:
+            ping_task = asyncio.create_task(ping_worker(acc_id, ad['token'], ad['release_version'], region=reg))
+            print_success(f"[PING] Started {acc_id}")
+
+        async def exp_refresher():
+            try:
+                f = bot_state.account_credentials.get(acc_id)
+                if f: await refresh_account_profile(f)
+            except Exception: pass
+            while True:
+                await asyncio.sleep(EXP_REFRESH_INTERVAL + random.uniform(-3.0, 3.0))
+                try:
+                    f = bot_state.account_credentials.get(acc_id)
+                    if f: await refresh_account_profile(f)
+                except Exception: pass
+        exp_task = asyncio.create_task(exp_refresher())
+        await functional_battle_royale(ad['functional_addrs'], tcp_online, ad['region'], ad['client_version'],
+            ad['aes_ak'], ad['iv_i'], account_id=acc_id, account_data=ad,
+            account_level=int(ad.get('level', 2) or 2))
+    except asyncio.CancelledError: raise
+    except Exception as e: print_error(f"run_account_worker {label}: {e}")
+    finally:
+        for t in (info_task, exp_task, ping_task):
+            if t and not t.done(): t.cancel()
+        for t in (info_task, exp_task, ping_task):
+            if t:
+                try: await t
+                except Exception: pass
+
+async def account_loop_guest(uid, password):
+    while True:
+        try:
+            print_info(f"[LOGIN] Guest {uid}...")
+            try: bot_state.update_status(str(uid), "CONNECTING")
+            except Exception: pass
+            ad = await process_account_uid_pass(uid, password)
+            if not ad:
+                print_error(f"Login failed {uid}, retry 15s")
+                try: bot_state.update_status(str(uid), "ERROR")
+                except Exception: pass
+                await asyncio.sleep(15); continue
+            await run_account_worker(ad, uid)
+            print_warning(f"Session end {uid}, reconnect 3s")
+            await asyncio.sleep(3)
+        except asyncio.CancelledError:
+            print_warning(f"Worker {uid} stopped")
+            try: bot_state.update_status(str(uid), "OFFLINE")
+            except Exception: pass
+            break
+        except Exception as e:
+            print_error(f"Error {uid}: {e}, retry 10s")
+            await asyncio.sleep(10)
+
+async def account_loop_token(token):
+    label = token[:10]
+    while True:
+        try:
+            ad = await process_account_token(token)
+            if not ad:
+                print_error("Login token fail, retry 15s")
+                await asyncio.sleep(15); continue
+            acc_id = str(ad['account_id'])
+            await run_account_worker(ad, acc_id)
+            await asyncio.sleep(3)
+        except asyncio.CancelledError:
+            print_warning(f"Token {label} stopped"); break
+        except Exception as e:
+            print_error(f"Token error: {e}, retry 10s")
+            await asyncio.sleep(10)
+
+def load_accounts():
+    accounts = []
+    if os.path.exists(ACCOUNTS_FILE):
+        try:
+            with open(ACCOUNTS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, list): accounts = data
+        except Exception as e: print_error(f"load: {e}")
+    return accounts
+
+# ═══════════════════════════ FUNCTIONAL BATTLE ROYALE ═══════════════════════════
 async def functional_battle_royale(addrs, starter_packet, account_region, client_version,
                                     key, iv, account_id="", account_data=None,
                                     account_level=2, max_reconnects=999999):
@@ -1965,444 +2257,4 @@ async def functional_battle_royale(addrs, starter_packet, account_region, client
                             token = r5.get('4', {}).get('data')
                             if '42' in r5: match_code = r5['42']['data']
                         if '1' in res and 'data' in res['1']:
-                            match_account_id = res['1']['data']
-                        if '5' in res and 'data' in res['5']:
-                            block_val = res['5']['data'].get('1', {}).get('data')
-
-                        effective = match_account_id or account_id or "BD_BOT"
-                        if token and udp_key and match_code and server_ip_port:
-                            async with _team_state["lock"]:
-                                all_peers = list(_team_state["peers"].keys())
-                            if all_peers:
-                                await squad_sync.reset_match(all_peers)
-
-                            acc_tok = current_account_data.get('access_token', '') if current_account_data else ""
-                            thunder, sharma = await build_match_startup_packets(
-                                token, udp_key, match_code, effective, block_val or 0,
-                                server_ip=server_ip_port, region=account_region,
-                                client_version=client_version, access_token=acc_tok,
-                                mode_id=BR_MODE_ID, map_id=BR_MAP_ID)
-                            match_index = await _inc_match(uid_str)
-
-                            new_match = asyncio.create_task(play_game(
-                                server_ip_port, thunder, sharma, udp_key, match_code,
-                                effective, current_search_region, client_version,
-                                current_key, current_iv,
-                                match_index=match_index, on_match_complete=trigger_post_match_refresh))
-                            play_matches.append(new_match)
-
-                            async def drain_gw():
-                                while not new_match.done():
-                                    try:
-                                        dg = await asyncio.wait_for(reader.read(4096), timeout=1.0)
-                                        if not dg: break
-                                    except asyncio.TimeoutError: continue
-                                    except Exception: break
-                            drain_task = asyncio.create_task(drain_gw())
-                            try: await new_match
-                            except Exception as e: print_error(f"[MATCH #{match_index}] {e}")
-                            finally:
-                                drain_task.cancel()
-                                try: await drain_task
-                                except asyncio.CancelledError: pass
-                            play_matches[:] = [m for m in play_matches if not m.done()]
-
-                            async with _team_state["lock"]:
-                                _team_state["peers"].pop(uid_str, None)
-                                if _team_state["leader_uid"] == uid_str:
-                                    _team_state["leader_uid"] = None
-                            await _team_member_leave(uid_str)
-                            
-                            try:
-                                if writer and not writer.is_closing():
-                                    writer.close()
-                                    await writer.wait_closed()
-                            except Exception: pass
-
-                            _team_active["flag"] = True
-                            await asyncio.sleep(NEW_MATCH_DELAY)
-                            break
-                    except Exception as e:
-                        print_error(f"[FUNC] Match parse error: {e}")
-                        break
-
-        except asyncio.CancelledError:
-            if gateway_ping_task: gateway_ping_task.cancel()
-            async with _team_state["lock"]:
-                _team_state["peers"].pop(uid_str, None)
-                if _team_state["leader_uid"] == uid_str:
-                    _team_state["leader_uid"] = None
-            await _team_member_leave(uid_str)
-            raise
-        except Exception as e:
-            if gateway_ping_task: gateway_ping_task.cancel()
-            print_error(f"[FUNC] TCP state {uid_str}: {e} - Reconnecting in 2s...")
-            if writer:
-                try: writer.close(); await writer.wait_closed()
-                except Exception: pass
-            reconnects += 1
-            await asyncio.sleep(2.0)
-        finally:
-            _team_active["flag"] = False
-            for tk in (team_coord_task, member_trigger_task):
-                if tk and not tk.done():
-                    tk.cancel()
-                    try: await tk
-                    except Exception: pass
-            if gateway_ping_task: gateway_ping_task.cancel()
-            if writer:
-                try: writer.close(); await writer.wait_closed()
-                except Exception: pass
-            async with _team_state["lock"]:
-                _team_state["peers"].pop(uid_str, None)
-                if _team_state["leader_uid"] == uid_str:
-                    _team_state["leader_uid"] = None
-            await _team_member_leave(uid_str)
-            _team_active["flag"] = True
-
-# ═══════════════════════════ INFORMATIONAL ═══════════════════════════
-async def informational(addrs, starter_packet, key, iv, region="ID", max_reconnects=999999):
-    ip, port = addrs.split(":")
-    while True:
-        writer = None; ping_task = None
-        try:
-            rip = await resolve_host_cloudflare(ip)
-            reader, writer = await asyncio.open_connection(rip, int(port))
-            rs = writer.get_extra_info('socket')
-            if rs: optimize_tcp_socket(rs)
-            writer.write(bytes.fromhex(starter_packet)); await writer.drain()
-            async def info_ka():
-                ka = await send_keep_alive(region)
-                while True:
-                    await asyncio.sleep(2.0)
-                    try:
-                        if writer and not writer.is_closing():
-                            writer.write(ka); await writer.drain()
-                    except Exception: break
-            ping_task = asyncio.create_task(info_ka())
-            while True:
-                data = await reader.read(8192)
-                if not data: raise ConnectionError("closed")
-        except asyncio.CancelledError:
-            if ping_task: ping_task.cancel()
-            if writer:
-                try: writer.close(); await writer.wait_closed()
-                except Exception: pass
-            raise
-        except Exception:
-            if ping_task: ping_task.cancel()
-            if writer:
-                try: writer.close(); await writer.wait_closed()
-                except Exception: pass
-            await asyncio.sleep(2.0)
-
-# ═══════════════════════════ ACCOUNT HELPERS ═══════════════════════════
-def _register_credentials(ad):
-    try:
-        acc_id = str(ad['account_id'])
-        bot_state.account_credentials[acc_id] = ad
-        if ad.get('auth_uid'): bot_state.account_credentials[str(ad['auth_uid'])] = ad
-        if ad.get('auth_token'): bot_state.account_credentials[f"tok_{ad['auth_token'][:20]}"] = ad
-    except Exception: pass
-
-async def refresh_account_profile(ad_or_uid):
-    try:
-        if isinstance(ad_or_uid, str):
-            uid = str(ad_or_uid); ad = bot_state.account_credentials.get(uid)
-        else:
-            ad = ad_or_uid; uid = str(ad.get('account_id')) if ad else "?"
-        if not ad: return
-        url = ad.get('server_url'); token = ad.get('token')
-        rel = ad.get('release_version'); payload = ad.get('login_payload_data')
-        if not (url and token and rel and payload): return
-        res = await send_getlogin(payload, url, token, rel)
-        if not res: return
-        rp, dd = res
-        def _si(v, d):
-            try:
-                if v is None or v == "": return d
-                return int(v)
-            except Exception: return d
-        level = _si(get_proto_field(dd, 6, None), None)
-        exp = _si(get_proto_field(dd, 7, None), None)
-        likes = _si(get_proto_field(dd, 8, None), None)
-        try: nick = rp.nickname or get_proto_field(dd, 4, "") or ""
-        except Exception: nick = ""
-        if level is None and exp is None: return
-        level = level if level is not None else 1
-        exp = exp if exp is not None else 0
-        likes = likes if likes is not None else 0
-        acc_id = str(ad['account_id'])
-        try: bot_state.update_exp(acc_id, exp, level)
-        except Exception: pass
-        if likes > 0 and acc_id in bot_state.accounts:
-            bot_state.accounts[acc_id]["likes"] = likes
-        if nick and acc_id in bot_state.accounts:
-            bot_state.accounts[acc_id]["nickname"] = nick
-        _update_cache_profile(ad, level, exp)
-        ad['level'] = level; ad['exp'] = exp
-        if likes > 0: ad['likes'] = likes
-        if nick: ad['nickname'] = nick
-    except Exception: pass
-
-async def process_account_uid_pass(uid, password):
-    cached = cache_get(uid)
-    if cached:
-        print_success(f"[CACHE] {uid} loaded")
-        acc_id = str(cached['account_id'])
-        bot_state.register_account(uid=acc_id,
-            nickname=cached.get('nickname', f"Player_{acc_id}"),
-            region=cached.get('region', 'ID'),
-            level=cached.get('level', 1), exp=cached.get('exp', 0),
-            likes=cached.get('likes', 0))
-        _register_credentials(cached); return cached
-    print_info(f"[LOGIN] UID {uid}...")
-    try:
-        vc = await version_config()
-        if not vc: return None
-        rel, cv, su = vc
-        tg = await get_access_token(uid, password)
-        if not tg: return None
-        oid, at, pf = tg
-        dev = get_device_for_account(uid)
-        lpd = await build_majorlogin_payload(oid, at, pf, cv, dev)
-        if not lpd: return None
-        mresp = await send_majorlogin(lpd, rel, su)
-        if mresp is None: return None
-        gl = await send_getlogin(lpd, mresp.url, mresp.token, rel)
-        if gl is None: return None
-        rp, dd = gl
-        acc_id = str(mresp.account_id)
-        level = int(get_proto_field(dd, 6, 1) or 1)
-        exp = int(get_proto_field(dd, 7, 0) or 0)
-        likes = int(get_proto_field(dd, 8, 0) or 0)
-        nick = rp.nickname or get_proto_field(dd, 4, f"Player_{acc_id}")
-        region = mresp.region or get_proto_field(dd, 3, "ID")
-        bot_state.register_account(uid=acc_id, nickname=nick, region=region,
-                                    level=level, exp=exp, likes=likes)
-        print_success(f"[OK] {acc_id} | {nick} | Lvl{level} | BATTLE ROYALE")
-        ad = {
-            'account_id': mresp.account_id, 'nickname': nick, 'region': region,
-            'level': level, 'exp': exp, 'likes': likes,
-            'open_id': oid, 'access_token': at, 'platform': str(pf),
-            'token': mresp.token, 'server_time': mresp.server_time,
-            'aes_ak': mresp.aes_ak, 'iv_i': mresp.iv_i,
-            'functional_addrs': rp.functional_addrs or get_proto_field(dd, 14),
-            'informational_addrs': rp.informational_addrs or get_proto_field(dd, 32),
-            'release_version': rel, 'client_version': cv, 'server_url': mresp.url,
-            'login_payload_data': lpd,
-            'auth_type': 'guest', 'auth_uid': uid, 'auth_password': password,
-        }
-        _register_credentials(ad); cache_set(uid, ad); return ad
-    except Exception as e:
-        print_error(f"process_account_uid_pass: {e}")
-        return None
-
-async def process_account_token(access_token):
-    cache_key = f"tok_{access_token[:20]}"
-    cached = cache_get(cache_key)
-    if cached:
-        acc_id = str(cached['account_id'])
-        bot_state.register_account(uid=acc_id,
-            nickname=cached.get('nickname', f"Player_{acc_id}"),
-            region=cached.get('region', 'ID'),
-            level=cached.get('level', 1), exp=cached.get('exp', 0),
-            likes=cached.get('likes', 0))
-        _register_credentials(cached); return cached
-    print_info("[LOGIN] Token...")
-    try:
-        vc = await version_config()
-        if not vc: return None
-        rel, cv, su = vc
-        import requests
-        url = f"https://100067.connect.garena.com/oauth/token/inspect?token={access_token}"
-        hdrs = {"User-Agent": "GarenaMSDK/4.0.19P4(G011A ;Android 9;en;US;)"}
-        resp = await asyncio.to_thread(requests.get, url, headers=hdrs, timeout=10)
-        d = resp.json()
-        if 'error' in d: return None
-        oid = d.get('open_id'); pf = d.get('platform', 4)
-        if not oid: return None
-        dev = get_device_for_account(oid)
-        lpd = await build_majorlogin_payload(oid, access_token, str(pf), cv, dev)
-        if not lpd: return None
-        mresp = await send_majorlogin(lpd, rel, su)
-        if mresp is None: return None
-        gl = await send_getlogin(lpd, mresp.url, mresp.token, rel)
-        if gl is None: return None
-        rp, dd = gl
-        acc_id = str(mresp.account_id)
-        level = int(get_proto_field(dd, 6, 1) or 1)
-        exp = int(get_proto_field(dd, 7, 0) or 0)
-        likes = int(get_proto_field(dd, 8, 0) or 0)
-        nick = rp.nickname or get_proto_field(dd, 4, f"Player_{acc_id}")
-        region = mresp.region or get_proto_field(dd, 3, "ID")
-        bot_state.register_account(uid=acc_id, nickname=nick, region=region,
-                                    level=level, exp=exp, likes=likes)
-        ad = {
-            'account_id': mresp.account_id, 'nickname': nick, 'region': region,
-            'level': level, 'exp': exp, 'likes': likes,
-            'open_id': oid, 'access_token': access_token, 'platform': str(pf),
-            'token': mresp.token, 'server_time': mresp.server_time,
-            'aes_ak': mresp.aes_ak, 'iv_i': mresp.iv_i,
-            'functional_addrs': rp.functional_addrs or get_proto_field(dd, 14),
-            'informational_addrs': rp.informational_addrs or get_proto_field(dd, 32),
-            'release_version': rel, 'client_version': cv, 'server_url': mresp.url,
-            'login_payload_data': lpd,
-            'auth_type': 'token', 'auth_token': access_token,
-        }
-        _register_credentials(ad); cache_set(cache_key, ad); return ad
-    except Exception as e:
-        print_error(f"process_account_token: {e}"); return None
-
-async def run_account_worker(ad, label):
-    acc_id = str(ad['account_id'])
-    info_task = None; exp_task = None; ping_task = None
-    try:
-        reg = ad.get('region', 'ID')
-        tcp_online = await build_tcp_startup_packet(
-            ad['account_id'], ad['token'], ad['server_time'],
-            ad['aes_ak'], ad['iv_i'], region=reg, typ='OnLine')
-        tcp_chat = await build_tcp_startup_packet(
-            ad['account_id'], ad['token'], ad['server_time'],
-            ad['aes_ak'], ad['iv_i'], region=reg, typ='ChaT')
-        info_task = asyncio.create_task(informational(ad['informational_addrs'], tcp_chat,
-                                                      ad['aes_ak'], ad['iv_i'], region=reg))
-        if ENABLE_HTTP_PING:
-            ping_task = asyncio.create_task(ping_worker(acc_id, ad['token'], ad['release_version'], region=reg))
-
-        async def exp_refresher():
-            try:
-                f = bot_state.account_credentials.get(acc_id)
-                if f: await refresh_account_profile(f)
-            except Exception: pass
-            while True:
-                await asyncio.sleep(EXP_REFRESH_INTERVAL + random.uniform(-3.0, 3.0))
-                try:
-                    f = bot_state.account_credentials.get(acc_id)
-                    if f: await refresh_account_profile(f)
-                except Exception: pass
-        exp_task = asyncio.create_task(exp_refresher())
-        await functional_battle_royale(ad['functional_addrs'], tcp_online, ad['region'], ad['client_version'],
-            ad['aes_ak'], ad['iv_i'], account_id=acc_id, account_data=ad,
-            account_level=int(ad.get('level', 2) or 2))
-    except asyncio.CancelledError: raise
-    except Exception as e: print_error(f"run_account_worker {label}: {e}")
-    finally:
-        for t in (info_task, exp_task, ping_task):
-            if t and not t.done(): t.cancel()
-        for t in (info_task, exp_task, ping_task):
-            if t:
-                try: await t
-                except Exception: pass
-
-async def account_loop_guest(uid, password):
-    while True:
-        try:
-            print_info(f"[LOGIN] Guest {uid}...")
-            try: bot_state.update_status(str(uid), "CONNECTING")
-            except Exception: pass
-            ad = await process_account_uid_pass(uid, password)
-            if not ad:
-                print_error(f"Login failed {uid}, retry 10s")
-                try: bot_state.update_status(str(uid), "ERROR")
-                except Exception: pass
-                await asyncio.sleep(10); continue
-            await run_account_worker(ad, uid)
-            await asyncio.sleep(2)
-        except asyncio.CancelledError:
-            print_warning(f"Worker {uid} stopped")
-            try: bot_state.update_status(str(uid), "OFFLINE")
-            except Exception: pass
-            break
-        except Exception as e:
-            print_error(f"Error {uid}: {e}, retry 5s")
-            await asyncio.sleep(5)
-
-async def account_loop_token(token):
-    label = token[:10]
-    while True:
-        try:
-            ad = await process_account_token(token)
-            if not ad:
-                print_error("Login token fail, retry 10s")
-                await asyncio.sleep(10); continue
-            acc_id = str(ad['account_id'])
-            await run_account_worker(ad, acc_id)
-            await asyncio.sleep(2)
-        except asyncio.CancelledError:
-            print_warning(f"Token {label} stopped"); break
-        except Exception as e:
-            print_error(f"Token error: {e}, retry 5s")
-            await asyncio.sleep(5)
-
-def load_accounts():
-    accounts = []
-    if os.path.exists(ACCOUNTS_FILE):
-        try:
-            with open(ACCOUNTS_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                if isinstance(data, list): accounts = data
-        except Exception as e: print_error(f"load: {e}")
-    if not accounts and FALLBACK_UID and FALLBACK_PASSWORD:
-        accounts.append({"uid": FALLBACK_UID, "password": FALLBACK_PASSWORD})
-    return accounts
-
-# ═══════════════════════════ MAIN ═══════════════════════════
-async def main():
-    print_colored("=" * 60, Colors.CYAN)
-    print_colored("  TEAM RBC — Squad Bot (Create/Invite/Accept/PK)", Colors.GREEN)
-    print_colored("=" * 60, Colors.CYAN)
-    print_info(f"Match interval: {START_MATCH_INTERVAL}s | Offline: {NEW_MATCH_DELAY}s")
-    print_info("Mode: BATTLE ROYALE ONLY")
-    if TEAM_MODE:
-        print_success(f"[SQUAD] size={TEAM_SIZE} peer_wait={TEAM_PEER_WAIT_TIMEOUT}s")
-    print_colored("=" * 60, Colors.CYAN)
-
-    try:
-        await start_web_dashboard(host=WEB_HOST, port=WEB_PORT)
-        print_success(f"Dashboard: http://localhost:{WEB_PORT}")
-    except Exception as e: print_error(f"Dashboard: {e}")
-
-    async def on_account_added(data):
-        if "token" in data and data["token"]:
-            t = str(data["token"]).strip()
-            task = asyncio.create_task(account_loop_token(t))
-            bot_state.account_workers[t[:10]] = task
-        elif "uid" in data and "password" in data:
-            u = str(data["uid"]).strip(); p = str(data["password"]).strip()
-            task = asyncio.create_task(account_loop_guest(u, p))
-            bot_state.account_workers[u] = task
-
-    async def on_refresh_account(uid):
-        await refresh_account_profile(uid)
-
-    try:
-        bot_state.refresh_callbacks["on_account_added"] = on_account_added
-        bot_state.refresh_callbacks["on_refresh_account"] = on_refresh_account
-    except Exception: pass
-
-    accounts = load_accounts()
-    if not accounts:
-        print_warning(f"No accounts in {ACCOUNTS_FILE}. Add via dashboard.")
-    for acc in accounts:
-        if acc.get("token"):
-            t = asyncio.create_task(account_loop_token(acc["token"]))
-            bot_state.account_workers[acc["token"][:10]] = t
-        elif acc.get("uid") and acc.get("password"):
-            u = str(acc["uid"])
-            t = asyncio.create_task(account_loop_guest(u, acc["password"]))
-            bot_state.account_workers[u] = t
-
-    try:
-        while True: await asyncio.sleep(1)
-    except (KeyboardInterrupt, asyncio.CancelledError):
-        print_warning("Shutting down...")
-        for t in list(bot_state.account_workers.values()): t.cancel()
-        await asyncio.gather(*bot_state.account_workers.values(), return_exceptions=True)
-        print_success("Closed.")
-
-if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print_warning("stopped")
+                            match_account_id = res['1']['data

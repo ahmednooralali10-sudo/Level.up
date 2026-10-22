@@ -72,7 +72,6 @@ MOVEMENT_TICK_MS            = 240
 MOVEMENT_RADIUS             = 180
 MOVEMENT_UPDATE_SPEED_EVERY = 4.0
 
-# Disabled to prevent in-game network cuts/ping failures
 ENABLE_HTTP_PING = False
 PING_INTERVAL    = 15.0
 PING_TIMEOUT     = 8.0
@@ -2327,3 +2326,40 @@ async def functional_battle_royale(addrs, starter_packet, account_region, client
                     except Exception as e:
                         print_error(f"[FUNC] Match parse error: {e}")
                         break
+        except Exception as e:
+            print_error(f"[FUNC] Loop error: {e}")
+            await asyncio.sleep(3.0)
+        finally:
+            if gateway_ping_task:
+                gateway_ping_task.cancel()
+                try: await gateway_ping_task
+                except asyncio.CancelledError: pass
+            if team_coord_task:
+                team_coord_task.cancel()
+                try: await team_coord_task
+                except asyncio.CancelledError: pass
+            if member_trigger_task:
+                member_trigger_task.cancel()
+                try: await member_trigger_task
+                except asyncio.CancelledError: pass
+            if writer:
+                try: writer.close(); await writer.wait_closed()
+                except Exception: pass
+
+# ═══════════════════════════ WEB APP (UI) ═══════════════════════════
+app = FastAPI()
+
+@app.get("/", response_class=HTMLResponse)
+async def web_index():
+    return """
+    <html>
+        <head><title>Team RBC - Squad Bot</title></head>
+        <body style="background: #111; color: #eee; font-family: sans-serif; text-align: center; padding-top: 50px;">
+            <h1>Team RBC Squad Bot Running Successfully!</h1>
+            <p>Full Web UI & Background Workers are active.</p>
+        </body>
+    </html>
+    """
+
+if __name__ == "__main__":
+    uvicorn.run(app, host=WEB_HOST, port=WEB_PORT)

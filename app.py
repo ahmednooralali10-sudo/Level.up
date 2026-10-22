@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
 # ═══════════════════════════════════════════════════════════════════
-#  TEAM RBC — Squad Bot (Full 2000+ Lines + Premium Web UI)
+#  TEAM RBC — Squad Bot (Full Version + Web UI)
 # ═══════════════════════════════════════════════════════════════════
 import sys, asyncio, httpx, random, json, socket, struct, time, os, uuid
 import itertools, secrets, traceback, base64, math
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple, Any
+
 from fastapi import FastAPI, Form
 from fastapi.responses import HTMLResponse, JSONResponse
 import uvicorn
@@ -71,6 +72,7 @@ MOVEMENT_TICK_MS            = 240
 MOVEMENT_RADIUS             = 180
 MOVEMENT_UPDATE_SPEED_EVERY = 4.0
 
+# Disabled to prevent in-game network cuts/ping failures
 ENABLE_HTTP_PING = False
 PING_INTERVAL    = 15.0
 PING_TIMEOUT     = 8.0
@@ -173,7 +175,10 @@ def purge_extra_accounts_from_file(keep_uids: set):
         with open(ACCOUNTS_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
         if isinstance(data, list):
-            filtered = [acc for acc in data if str(acc.get("uid", "")) in keep_uids_str or str(acc.get("account_id", "")) in keep_uids_str]
+            filtered = [
+                acc for acc in data 
+                if str(acc.get("uid", "")) in keep_uids_str or str(acc.get("account_id", "")) in keep_uids_str
+            ]
             with open(ACCOUNTS_FILE, "w", encoding="utf-8") as f:
                 json.dump(filtered, f, indent=2)
             print_success(f"[CLEANUP] Extra accounts purged from {ACCOUNTS_FILE}! Kept {len(filtered)} group accounts.")
@@ -234,6 +239,7 @@ def get_device_for_account(account_identifier):
     except Exception: pass
     return dev
 
+# ═══════════════════════════ DNS ═══════════════════════════
 _DNS_CACHE: Dict[str, Tuple[str, float]] = {}
 _DNS_CACHE_TTL = 300.0
 
@@ -275,7 +281,9 @@ def optimize_udp_socket(sock):
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 131072)
     except Exception: pass
 
-client = httpx.AsyncClient(verify=False, timeout=10.0, limits=httpx.Limits(max_connections=100, max_keepalive_connections=50))
+# ═══════════════════════════ HTTP CLIENT ═══════════════════════════
+client = httpx.AsyncClient(verify=False, timeout=10.0,
+    limits=httpx.Limits(max_connections=100, max_keepalive_connections=50))
 headers = {
     'User-Agent': 'UnityPlayer/2018.4.12f1 (UnityWebRequest/1.0, libcurl/8.5.0-DEV)',
     'Connection': 'Keep-Alive', 'Accept-Encoding': 'gzip',
@@ -305,6 +313,7 @@ _ROUNDS = 16
 _FIELD_SIZES = {0:1, 1:2, 2:2, 3:1, 4:2}
 _FIELD_NAMES = {0:"sendOption", 1:"cmd", 2:"orderId", 3:"flags", 4:"length"}
 
+# ═══════════════════════════ LOG ═══════════════════════════
 class Colors:
     GREEN='\033[92m'; FAIL='\033[91m'; WARNING='\033[93m'
     CYAN='\033[96m'; MAGENTA='\033[95m'; WHITE='\033[97m'; ENDC='\033[0m'
@@ -337,6 +346,7 @@ def get_proto_field(d, key, default=None):
         v = d[str(key)].get('data'); return v if v is not None else default
     return default
 
+# ═══════════════════════════ MATCH COUNTER ═══════════════════════════
 _match_counters: Dict[str, int] = {}
 _match_counter_lock = asyncio.Lock()
 
@@ -359,6 +369,7 @@ async def _get_total_match_count():
     async with _match_counter_lock:
         return sum(_match_counters.values())
 
+# ═══════════════════════════ SQUAD STATE ═══════════════════════════
 _team_state = {
     "peers": {},
     "leader_uid": None,
@@ -400,6 +411,7 @@ async def _team_member_reset(keep_leader=True):
         if keep_leader and _team_state["leader_uid"]:
             _team_state["members"].add(_team_state["leader_uid"])
 
+# ═══════════════════════════ TOKEN CACHE ═══════════════════════════
 _token_cache_memo = {}
 _token_cache_memo_time = 0.0
 _TOKEN_CACHE_MEMO_TTL = 5.0
@@ -483,6 +495,7 @@ def _update_cache_profile(data, level, exp):
         if ch: _save_token_cache(cache)
     except Exception: pass
 
+# ═══════════════════════════ ENCRYPTION ═══════════════════════════
 async def aes_encrypt(payload, key, iv):
     return AES.new(key, AES.MODE_CBC, iv).encrypt(pad(payload, AES.block_size))
 
@@ -608,6 +621,7 @@ def _decode_proto_manual(data):
         else: break
     return result
 
+# ═══════════════════════════ MANUAL PROTOBUF ENCODE ═══════════════════════════
 def encode_varint(n):
     if n < 0: return b''
     out = bytearray()
@@ -632,11 +646,13 @@ def build_proto(fields):
     return b''.join(parts)
 
 def encrypt_api(plain_hex):
-    return AES.new(AES_KEY, AES.MODE_CBC, AES_IV).encrypt(pad(bytes.fromhex(plain_hex), AES.block_size)).hex()
+    return AES.new(AES_KEY, AES.MODE_CBC, AES_IV).encrypt(
+        pad(bytes.fromhex(plain_hex), AES.block_size)).hex()
 
 def encrypt_api_bytes(plain_bytes):
     return AES.new(AES_KEY, AES.MODE_CBC, AES_IV).encrypt(pad(plain_bytes, AES.block_size))
 
+# ═══════════════════════════ SQUAD PROTOBUF BUILDERS ═══════════════════════════
 def _pb_varint(fn, val): return encode_varint((fn << 3) | 0) + encode_varint(val)
 def _pb_length(fn, val):
     enc = val.encode('utf-8') if isinstance(val, str) else val
@@ -650,7 +666,8 @@ def create_proto(fields):
             packet.extend(_pb_length(field, bytes(create_proto(value))))
         elif isinstance(value, list):
             for item in value:
-                if isinstance(item, dict): packet.extend(_pb_length(field, bytes(create_proto(item))))
+                if isinstance(item, dict):
+                    packet.extend(_pb_length(field, bytes(create_proto(item))))
                 elif isinstance(item, str): packet.extend(_pb_length(field, item))
                 elif isinstance(item, (bytes, bytearray)): packet.extend(_pb_length(field, bytes(item)))
                 elif isinstance(item, bool): packet.extend(_pb_varint(field, 1 if item else 0))
@@ -672,6 +689,7 @@ def create_packet(Pk, N, K, V):
     if pad_len < 0: pad_len = 0
     return bytes.fromhex(N + ('0' * pad_len) + hexlen + PkEnc)
 
+# ═══════════ SQUAD PACKETS ═══════════
 def create_team(key, iv, game_version="1.132.9"):
     fields = {
         1: 1, 2: {2: bytes.fromhex("01"), 3: 1, 4: 3, 5: "en",
@@ -688,7 +706,8 @@ def team_fresh(account_id, key, iv):
     return create_packet(create_proto({1: 72, 2: {1: int(account_id)}}).hex(), "0515", key, iv)
 
 def invite_player_in_team(target_uid, key, iv, region="ID"):
-    return create_packet(create_proto({1: 2, 2: {1: int(target_uid), 2: region, 4: 1}}).hex(), "0515", key, iv)
+    return create_packet(create_proto({1: 2, 2: {1: int(target_uid), 2: region, 4: 1}}).hex(),
+                         "0515", key, iv)
 
 def accept_team_invite(target_uid, group_id, key, iv):
     fields = {1: 4, 2: {1: int(target_uid), 3: int(target_uid),
@@ -710,6 +729,7 @@ def start_match_team(account_id, key, iv, region="ID"):
 def ready_for_game(uid, key, iv):
     return create_packet(create_proto({1: 15, 2: {1: uid, 2: 1}}).hex(), "0519", key, iv)
 
+# ═══════════════════════════ MAJORLOGIN / GETLOGIN ═══════════════════════════
 async def build_majorlogin_payload(open_id, access_token, platform, client_version, dev):
     try:
         p = {
@@ -797,6 +817,7 @@ async def send_getlogin(data, base_url, token, release_version):
         return rp, dd
     except Exception: return None
 
+# ═══════════════════════════ HTTP PING ═══════════════════════════
 async def send_ping(account_id, token, release_version):
     try:
         try: acc = int(account_id)
@@ -836,6 +857,7 @@ async def ping_worker(account_id, token, release_version, region="ID"):
     except asyncio.CancelledError: pass
     finally: print_info(f"[PING] Stopped {uid_str} OK={ok_count}")
 
+# ═══════════════════════════ TCP STARTUP ═══════════════════════════
 async def build_tcp_startup_packet(account_id, token, server_time, key, iv, region="ID", typ='OnLine'):
     uid_hex = f"{int(account_id):016x}"
     ts_hex = f"{int(server_time):08x}"
@@ -855,6 +877,7 @@ async def send_keep_alive(region="ID"):
     except Exception:
         return bytes.fromhex("0219")
 
+# ═══════════════════════════ MATCH SEARCH PACKETS ═══════════════════════════
 BR_HEX = (
     "080112800a0a010110013a110a044944433110aa011a064555524f50453a100a044944433210311a064555524f5045"
     "40014a0801090a0b1219202758016291090a80013038384638324246303241393637363730323031303130303030"
@@ -907,6 +930,7 @@ async def start_game_battle_royale(region, client_version, writer, key, iv):
     writer.write(bytes.fromhex(final)); await writer.drain()
     print_info(f"[BR] search sent ({plen}B) R={reg}")
 
+# ═══════════════════════════ UDP HELPERS ═══════════════════════════
 async def has_ssan_zig(n):
     z = (n << 1) & 0xFFFFFFFFFFFFFFFF
     out = bytearray()
@@ -957,7 +981,8 @@ async def tea_cbc_encrypt(padded, key_bytes):
     for i in range(0, len(padded), 8):
         x = bytearray(8)
         for j in range(8): x[j] = padded[i+j] ^ pc[j]
-        e0,e1 = await tea_enc(struct.unpack_from("<I", x, 0)[0], struct.unpack_from("<I", x, 4)[0], k0,k1,k2,k3)
+        e0,e1 = await tea_enc(struct.unpack_from("<I", x, 0)[0],
+                              struct.unpack_from("<I", x, 4)[0], k0,k1,k2,k3)
         enc = bytearray(8)
         struct.pack_into("<I", enc, 0, e0); struct.pack_into("<I", enc, 4, e1)
         for j in range(8): out[i+j] = enc[j] ^ pi[j]
@@ -970,7 +995,8 @@ async def tea_cbc_decrypt(body, key_bytes):
     x = bytearray(8); dec = bytearray(8)
     for i in range(0, len(body), 8):
         for j in range(8): x[j] = body[i+j] ^ pi[j]
-        d0,d1 = await tea_dec(struct.unpack_from("<I", x, 0)[0], struct.unpack_from("<I", x, 4)[0], k0,k1,k2,k3)
+        d0,d1 = await tea_dec(struct.unpack_from("<I", x, 0)[0],
+                              struct.unpack_from("<I", x, 4)[0], k0,k1,k2,k3)
         struct.pack_into("<I", dec, 0, d0); struct.pack_into("<I", dec, 4, d1)
         for j in range(8): out[i+j] = dec[j] ^ pc[j]
         pc[:] = body[i:i+8]; pi[:] = dec
@@ -1073,7 +1099,8 @@ async def keepalive_ping(sock, ip, port, key_bytes, mask, stop_event):
     while not stop_event.is_set():
         pk = ping_keys[i % len(ping_keys)]
         counter = int(time.time() * 1000) & 0xFFFFFFFF
-        pkt = await build_packet(pk, nr, 0, 3, None, 0, struct.pack("<I", counter) + b"\x00\x00\x00", key_bytes, encrypted=False)
+        pkt = await build_packet(pk, nr, 0, 3, None, 0, struct.pack("<I", counter) + b"\x00\x00\x00",
+                                 key_bytes, encrypted=False)
         try: await loop.sock_sendto(sock, pkt, (ip, port))
         except Exception: pass
         i += 1
@@ -1085,7 +1112,8 @@ async def try_header(buf, layout, k, v80):
     for code in layout:
         size = _FIELD_SIZES[code]
         if off + size > len(buf): return None
-        out[_FIELD_NAMES[code]] = ((buf[off] ^ k) if size == 1 else ((buf[off] | (buf[off+1] << 8)) ^ v80) & 0xFFFF)
+        out[_FIELD_NAMES[code]] = ((buf[off] ^ k) if size == 1
+                                    else ((buf[off] | (buf[off+1] << 8)) ^ v80) & 0xFFFF)
         off += size
     out["headerLen"] = off
     return out
@@ -1123,12 +1151,19 @@ async def decode_packet(packet, key, mask=None):
             if content is None: continue
         else: content = body
         score = (1 if crc_ok else 0) + (1 if content is not None else 0)
-        candidates.append({"kind":kind, "layout":layout, "headerLen":f["headerLen"], "msgKey":data[0], "cmd":f["cmd"], "flags":f["flags"], "sendOption":f["sendOption"], "orderId":f.get("orderId"), "length":f["length"], "content":content, "crcOk":crc_ok, "score":score, "total":len(data)})
+        candidates.append({"kind":kind, "layout":layout, "headerLen":f["headerLen"],
+            "msgKey":data[0], "cmd":f["cmd"], "flags":f["flags"],
+            "sendOption":f["sendOption"], "orderId":f.get("orderId"),
+            "length":f["length"], "content":content, "crcOk":crc_ok,
+            "score":score, "total":len(data)})
     if not candidates: return None
     candidates.sort(key=lambda c: c["score"], reverse=True)
     return candidates[0]
 
-async def build_match_startup_packets(token, udp_key, match_code, account_id, block_val, server_ip="", region="ID", client_version="1.132.6", client_version_code="2019121229", access_token="", mode_id=BR_MODE_ID, map_id=BR_MAP_ID):
+async def build_match_startup_packets(token, udp_key, match_code, account_id, block_val,
+                                      server_ip="", region="ID", client_version="1.132.6",
+                                      client_version_code="2019121229", access_token="",
+                                      mode_id=BR_MODE_ID, map_id=BR_MAP_ID):
     token = token.strip()
     udp_key = bytes.fromhex(udp_key)
     match_code = [int(ch) for ch in str(match_code).strip()]
@@ -1138,7 +1173,11 @@ async def build_match_startup_packets(token, udp_key, match_code, account_id, bl
     esh = sharma_jwt.encode() if isinstance(sharma_jwt, str) else sharma_jwt
     garena420 = await has_ssan_zig(len(eth)) + eth
     reg = str(region).upper() if region else "ID"
-    csoversea_block = bytes.fromhex("ca0163736f7665727365612e7374726f6e67686f6c642e66726565666972656d6f62696c652e636f6d3b302e302e302e303b33342e3132362e37362e34353b33342e38372e3137372e31343b33342e38372e3137302e3233303b33352e3138352e3138332e3537000000000000010000000000000000000000000100000800000100000000000100a8a2d7bebd8d8bdf110200")
+    csoversea_block = bytes.fromhex(
+        "ca0163736f7665727365612e7374726f6e67686f6c642e66726565666972656d6f62696c652e636f6d"
+        "3b302e302e302e303b33342e3132362e37362e34353b33342e38372e3137372e31343b33342e38372e"
+        "3137302e3233303b33352e3138352e3138332e35370000000000000100000000000000000000000001"
+        "00000800000100000000000100a8a2d7bebd8d8bdf110200")
     mid = bytes.fromhex('0000000001000102030101') + await has_ssan_zig(len(reg)) + reg.encode()
     mid += bytes.fromhex('0001030003000004')
     mid += await has_ssan_zig(len(client_version)) + client_version.encode()
@@ -1150,21 +1189,35 @@ async def build_match_startup_packets(token, udp_key, match_code, account_id, bl
         clean_acc = access_token.strip()
         mid += await has_ssan_zig(len(clean_acc)) + clean_acc.encode()
     mid += await has_ssan_zig(len(esh)) + esh
-    tg = (await uleb_encode(int(account_id)) + await uleb_encode(int(block_val)) + await uleb_encode(1) + await uleb_encode(int(mode_id)) + await uleb_encode(int(block_val)) + await uleb_encode(int(map_id)) + mid)
+    tg = (await uleb_encode(int(account_id)) + await uleb_encode(int(block_val)) +
+          await uleb_encode(1) + await uleb_encode(int(mode_id)) +
+          await uleb_encode(int(block_val)) + await uleb_encode(int(map_id)) + mid)
     process = await sv_frame(0x5E, match_code, 2, 447, 0, 1, garena420, udp_key)
     loading = await sv_frame(0x5A, match_code, 2, 448, 1, 1, tg, udp_key)
     return process.hex(), loading.hex()
 
-async def build_movement_packet_2001(key_bytes, msg_key, player_state, x, y, z, tick, counter, move_state, account_uid, room_code, phase="game"):
+# ═══════════════════════════ MOVEMENT 2001 ═══════════════════════════
+async def build_movement_packet_2001(key_bytes, msg_key, player_state, x, y, z,
+                                     tick, counter, move_state, account_uid,
+                                     room_code, phase="game"):
     if phase == "game":
-        TAIL = (b"\x00"*7 + b"\x93\xca\xd5\xf9\x0b" + b"\x8e\xfe\xfc\xf7\x0b" + b"\xf4\xe0\xfe\xf7\x03" + b"\x00\x00")
+        TAIL = (b"\x00"*7 + b"\x93\xca\xd5\xf9\x0b" + b"\x8e\xfe\xfc\xf7\x0b"
+                + b"\xf4\xe0\xfe\xf7\x03" + b"\x00\x00")
     else:
-        TAIL = (b"\x00"*7 + b"\xbd\xb6\xe1\xf3\x03" + b"\x00" + b"\xc4\xb6\xe1\xfb\x0b" + b"\x00\x00")
+        TAIL = (b"\x00"*7 + b"\xbd\xb6\xe1\xf3\x03" + b"\x00"
+                + b"\xc4\xb6\xe1\xfb\x0b" + b"\x00\x00")
     body = bytearray()
-    body += await uleb_encode(int(account_uid)) + await uleb_encode(int(player_state))
-    body += await zigzag_encode_signed(int(x)) + await zigzag_encode_signed(int(y)) + await zigzag_encode_signed(int(z))
-    body += b"\x00" + await uleb_encode(int(move_state)) + TAIL
-    body += await uleb_encode(int(tick)) + b"\x00\x00\x00" + await uleb_encode(int(counter))
+    body += await uleb_encode(int(account_uid))
+    body += await uleb_encode(int(player_state))
+    body += await zigzag_encode_signed(int(x))
+    body += await zigzag_encode_signed(int(y))
+    body += await zigzag_encode_signed(int(z))
+    body += b"\x00"
+    body += await uleb_encode(int(move_state))
+    body += TAIL
+    body += await uleb_encode(int(tick))
+    body += b"\x00\x00\x00"
+    body += await uleb_encode(int(counter))
     body = bytes(body)
     k = key_bytes[0]; v80 = ((k << 8) | k) & 0xFFFF
     h = bytearray()
@@ -1177,6 +1230,7 @@ async def build_movement_packet_2001(key_bytes, msg_key, player_state, x, y, z, 
 
 class MovementTracker:
     PLAYER_STATE = {"idle": 0, "walk": 1, "run": 2, "sprint": 3, "jump": 4, "crouch": 5, "prone": 6}
+
     def __init__(self, pattern="circle", radius=180):
         self.pattern = pattern
         self.radius = int(radius)
@@ -1216,7 +1270,8 @@ async def movement_worker(sock, ip, port, udp_key_bytes, match_code, account_id,
         while not stop_event.is_set():
             try:
                 ps, x, y, z, ms, tick, cnt, sm, st = tracker.next()
-                pkt = await build_movement_packet_2001(udp_key_bytes, 0x6B, ps, x, y, z, tick, cnt, ms, account_id, match_code, phase="game")
+                pkt = await build_movement_packet_2001(udp_key_bytes, 0x6B, ps, x, y, z, tick, cnt, ms,
+                                                       account_id, match_code, phase="game")
                 await loop.sock_sendto(sock, pkt, addr); sent += 1
                 if sent % 30 == 0: print_info(f"[MOVE] #{match_index} sent={sent} {st}({ps}) rate={sm}x")
                 base = MOVEMENT_TICK_MS / 1000.0
@@ -1266,7 +1321,10 @@ async def anti_afk_worker(sock, ip, port, udp_key_bytes, match_code, account_id,
     finally:
         if fires > 0: print_info(f"[AFK] #{match_index} Fires={fires}")
 
-async def play_game(server_ip_port, thunder, sharma, udp_key, match_code, account_id, player_region, client_version, key, iv, match_index, on_match_complete=None):
+# ═══════════════════════════ PLAY GAME ═══════════════════════════
+async def play_game(server_ip_port, thunder, sharma, udp_key, match_code,
+                    account_id, player_region, client_version, key, iv,
+                    match_index, on_match_complete=None):
     t0 = time.time()
     ping_task = anti_task = move_task = None
     sock = None
@@ -1295,10 +1353,12 @@ async def play_game(server_ip_port, thunder, sharma, udp_key, match_code, accoun
             nonlocal anti_task, move_task, anti_started
             if anti_started: return
             anti_started = True
-            anti_task = asyncio.create_task(anti_afk_worker(sock, rip, port, udp_key_bytes, match_code, account_id, anti_stop, match_index))
+            anti_task = asyncio.create_task(anti_afk_worker(sock, rip, port, udp_key_bytes, match_code,
+                                                            account_id, anti_stop, match_index))
             print_success(f"[AFK] Worker #{match_index}")
             if ENABLE_SPEED_MOVEMENT:
-                move_task = asyncio.create_task(movement_worker(sock, rip, port, udp_key_bytes, match_code, account_id, move_stop, match_index))
+                move_task = asyncio.create_task(movement_worker(sock, rip, port, udp_key_bytes, match_code,
+                                                                account_id, move_stop, match_index))
                 print_success(f"[MOVE] Worker #{match_index} | {MOVEMENT_PATTERN}")
 
         async def send_startup():
@@ -1431,6 +1491,7 @@ async def start_startup_safe(fn):
     try: await fn()
     except Exception: pass
 
+# ═══════════════════════════ FRIEND REQUEST ═══════════════════════════
 async def _process_social_packet(raw_bytes, account_data, tag="MAIN"):
     try:
         hex_data = raw_bytes.hex()
@@ -1499,7 +1560,9 @@ def _wrap_manual(inner):
     except Exception: pass
     return None
 
-async def _handle_team_invite(hex_data, pl, uid_str, current_account_data, current_key, current_iv, writer):
+# ═══════════════════════════ TEAM INVITE HANDLER ═══════════════════════════
+async def _handle_team_invite(hex_data, pl, uid_str, current_account_data,
+                              current_key, current_iv, writer):
     try:
         if DEBUG_TEAM_PACKETS:
             print_info(f"[TEAM-IN {uid_str}] len={pl} hex={hex_data[:80]}")
@@ -1609,6 +1672,7 @@ async def _handle_team_invite(hex_data, pl, uid_str, current_account_data, curre
         print_warning(f"[TEAM-IN {uid_str}] error: {e}")
         return False
 
+# ═══════════════════════════ INFORMATIONAL ═══════════════════════════
 async def informational(addrs, starter_packet, key, iv, region="ID", max_reconnects=999999):
     ip, port = addrs.split(":")
     while True:
@@ -1644,6 +1708,7 @@ async def informational(addrs, starter_packet, key, iv, region="ID", max_reconne
                 except Exception: pass
             await asyncio.sleep(2.0)
 
+# ═══════════════════════════ ACCOUNT HELPERS ═══════════════════════════
 def _register_credentials(ad):
     try:
         acc_id = str(ad['account_id'])
@@ -1697,7 +1762,11 @@ async def process_account_uid_pass(uid, password):
     if cached:
         print_success(f"[CACHE] {uid} loaded")
         acc_id = str(cached['account_id'])
-        bot_state.register_account(uid=acc_id, nickname=cached.get('nickname', f"Player_{acc_id}"), region=cached.get('region', 'ID'), level=cached.get('level', 1), exp=cached.get('exp', 0), likes=cached.get('likes', 0))
+        bot_state.register_account(uid=acc_id,
+            nickname=cached.get('nickname', f"Player_{acc_id}"),
+            region=cached.get('region', 'ID'),
+            level=cached.get('level', 1), exp=cached.get('exp', 0),
+            likes=cached.get('likes', 0))
         _register_credentials(cached); return cached
     print_info(f"[LOGIN] UID {uid}...")
     try:
@@ -1721,9 +1790,21 @@ async def process_account_uid_pass(uid, password):
         likes = int(get_proto_field(dd, 8, 0) or 0)
         nick = rp.nickname or get_proto_field(dd, 4, f"Player_{acc_id}")
         region = mresp.region or get_proto_field(dd, 3, "ID")
-        bot_state.register_account(uid=acc_id, nickname=nick, region=region, level=level, exp=exp, likes=likes)
+        bot_state.register_account(uid=acc_id, nickname=nick, region=region,
+                                    level=level, exp=exp, likes=likes)
         print_success(f"[OK] {acc_id} | {nick} | Lvl{level} | BATTLE ROYALE")
-        ad = {'account_id': mresp.account_id, 'nickname': nick, 'region': region, 'level': level, 'exp': exp, 'likes': likes, 'open_id': oid, 'access_token': at, 'platform': str(pf), 'token': mresp.token, 'server_time': mresp.server_time, 'aes_ak': mresp.aes_ak, 'iv_i': mresp.iv_i, 'functional_addrs': rp.functional_addrs or get_proto_field(dd, 14), 'informational_addrs': rp.informational_addrs or get_proto_field(dd, 32), 'release_version': rel, 'client_version': cv, 'server_url': mresp.url, 'login_payload_data': lpd, 'auth_type': 'guest', 'auth_uid': uid, 'auth_password': password}
+        ad = {
+            'account_id': mresp.account_id, 'nickname': nick, 'region': region,
+            'level': level, 'exp': exp, 'likes': likes,
+            'open_id': oid, 'access_token': at, 'platform': str(pf),
+            'token': mresp.token, 'server_time': mresp.server_time,
+            'aes_ak': mresp.aes_ak, 'iv_i': mresp.iv_i,
+            'functional_addrs': rp.functional_addrs or get_proto_field(dd, 14),
+            'informational_addrs': rp.informational_addrs or get_proto_field(dd, 32),
+            'release_version': rel, 'client_version': cv, 'server_url': mresp.url,
+            'login_payload_data': lpd,
+            'auth_type': 'guest', 'auth_uid': uid, 'auth_password': password,
+        }
         _register_credentials(ad); cache_set(uid, ad); return ad
     except Exception as e:
         print_error(f"process_account_uid_pass: {e}")
@@ -1734,7 +1815,11 @@ async def process_account_token(access_token):
     cached = cache_get(cache_key)
     if cached:
         acc_id = str(cached['account_id'])
-        bot_state.register_account(uid=acc_id, nickname=cached.get('nickname', f"Player_{acc_id}"), region=cached.get('region', 'ID'), level=cached.get('level', 1), exp=cached.get('exp', 0), likes=cached.get('likes', 0))
+        bot_state.register_account(uid=acc_id,
+            nickname=cached.get('nickname', f"Player_{acc_id}"),
+            region=cached.get('region', 'ID'),
+            level=cached.get('level', 1), exp=cached.get('exp', 0),
+            likes=cached.get('likes', 0))
         _register_credentials(cached); return cached
     print_info("[LOGIN] Token...")
     try:
@@ -1763,8 +1848,20 @@ async def process_account_token(access_token):
         likes = int(get_proto_field(dd, 8, 0) or 0)
         nick = rp.nickname or get_proto_field(dd, 4, f"Player_{acc_id}")
         region = mresp.region or get_proto_field(dd, 3, "ID")
-        bot_state.register_account(uid=acc_id, nickname=nick, region=region, level=level, exp=exp, likes=likes)
-        ad = {'account_id': mresp.account_id, 'nickname': nick, 'region': region, 'level': level, 'exp': exp, 'likes': likes, 'open_id': oid, 'access_token': access_token, 'platform': str(pf), 'token': mresp.token, 'server_time': mresp.server_time, 'aes_ak': mresp.aes_ak, 'iv_i': mresp.iv_i, 'functional_addrs': rp.functional_addrs or get_proto_field(dd, 14), 'informational_addrs': rp.informational_addrs or get_proto_field(dd, 32), 'release_version': rel, 'client_version': cv, 'server_url': mresp.url, 'login_payload_data': lpd, 'auth_type': 'token', 'auth_token': access_token}
+        bot_state.register_account(uid=acc_id, nickname=nick, region=region,
+                                    level=level, exp=exp, likes=likes)
+        ad = {
+            'account_id': mresp.account_id, 'nickname': nick, 'region': region,
+            'level': level, 'exp': exp, 'likes': likes,
+            'open_id': oid, 'access_token': access_token, 'platform': str(pf),
+            'token': mresp.token, 'server_time': mresp.server_time,
+            'aes_ak': mresp.aes_ak, 'iv_i': mresp.iv_i,
+            'functional_addrs': rp.functional_addrs or get_proto_field(dd, 14),
+            'informational_addrs': rp.informational_addrs or get_proto_field(dd, 32),
+            'release_version': rel, 'client_version': cv, 'server_url': mresp.url,
+            'login_payload_data': lpd,
+            'auth_type': 'token', 'auth_token': access_token,
+        }
         _register_credentials(ad); cache_set(cache_key, ad); return ad
     except Exception as e:
         print_error(f"process_account_token: {e}"); return None
@@ -1774,12 +1871,18 @@ async def run_account_worker(ad, label):
     info_task = None; exp_task = None; ping_task = None
     try:
         reg = ad.get('region', 'ID')
-        tcp_online = await build_tcp_startup_packet(ad['account_id'], ad['token'], ad['server_time'], ad['aes_ak'], ad['iv_i'], region=reg, typ='OnLine')
-        tcp_chat = await build_tcp_startup_packet(ad['account_id'], ad['token'], ad['server_time'], ad['aes_ak'], ad['iv_i'], region=reg, typ='ChaT')
-        info_task = asyncio.create_task(informational(ad['informational_addrs'], tcp_chat, ad['aes_ak'], ad['iv_i'], region=reg))
+        tcp_online = await build_tcp_startup_packet(
+            ad['account_id'], ad['token'], ad['server_time'],
+            ad['aes_ak'], ad['iv_i'], region=reg, typ='OnLine')
+        tcp_chat = await build_tcp_startup_packet(
+            ad['account_id'], ad['token'], ad['server_time'],
+            ad['aes_ak'], ad['iv_i'], region=reg, typ='ChaT')
+        info_task = asyncio.create_task(informational(ad['informational_addrs'], tcp_chat,
+                                                      ad['aes_ak'], ad['iv_i'], region=reg))
         if ENABLE_HTTP_PING:
             ping_task = asyncio.create_task(ping_worker(acc_id, ad['token'], ad['release_version'], region=reg))
             print_success(f"[PING] Started {acc_id}")
+
         async def exp_refresher():
             try:
                 f = bot_state.account_credentials.get(acc_id)
@@ -1792,7 +1895,9 @@ async def run_account_worker(ad, label):
                     if f: await refresh_account_profile(f)
                 except Exception: pass
         exp_task = asyncio.create_task(exp_refresher())
-        await functional_battle_royale(ad['functional_addrs'], tcp_online, ad['region'], ad['client_version'], ad['aes_ak'], ad['iv_i'], account_id=acc_id, account_data=ad, account_level=int(ad.get('level', 2) or 2))
+        await functional_battle_royale(ad['functional_addrs'], tcp_online, ad['region'], ad['client_version'],
+            ad['aes_ak'], ad['iv_i'], account_id=acc_id, account_data=ad,
+            account_level=int(ad.get('level', 2) or 2))
     except asyncio.CancelledError: raise
     except Exception as e: print_error(f"run_account_worker {label}: {e}")
     finally:
@@ -1856,7 +1961,10 @@ def load_accounts():
         accounts.append({"uid": FALLBACK_UID, "password": FALLBACK_PASSWORD})
     return accounts
 
-async def functional_battle_royale(addrs, starter_packet, account_region, client_version, key, iv, account_id="", account_data=None, account_level=2, max_reconnects=999999):
+# ═══════════════════════════ FUNCTIONAL (MAIN) — BATTLE ROYALE ONLY ═══════════════════════════
+async def functional_battle_royale(addrs, starter_packet, account_region, client_version,
+                                    key, iv, account_id="", account_data=None,
+                                    account_level=2, max_reconnects=999999):
     reconnects = 0
     ip, port = addrs.split(":")
     play_matches: List[asyncio.Task] = []
@@ -2098,7 +2206,9 @@ async def functional_battle_royale(addrs, starter_packet, account_region, client
             reconnects = 0; no_response_count = 0
 
             async with _team_state["lock"]:
-                _team_state["peers"][uid_str] = {"writer": writer, "data": current_account_data, "key": current_key, "iv": current_iv}
+                _team_state["peers"][uid_str] = {
+                    "writer": writer, "data": current_account_data,
+                    "key": current_key, "iv": current_iv}
                 if _team_state["leader_uid"] is None or _team_state["leader_uid"] not in _team_state["peers"]:
                     _team_state["leader_uid"] = list(_team_state["peers"].keys())[0]
                     print_success(f"[TEAM] 👑 Assigned Leader: {_team_state['leader_uid']}")
@@ -2134,4 +2244,38 @@ async def functional_battle_royale(addrs, starter_packet, account_region, client
                     raise ConnectionError("Connection closed by remote server")
                 hex_data = data.hex()
                 pl = len(data)
-                no_response_count
+                no_response_count = 0
+
+                if hex_data.startswith("0600") and pl > 20:
+                    await _process_social_packet(data, current_account_data, tag="MAIN")
+                    continue
+
+                if hex_data.startswith("05") and pl > 10:
+                    await _handle_team_invite(hex_data, pl, uid_str, current_account_data,
+                                              current_key, current_iv, writer)
+                    continue
+
+                if hex_data.startswith("0300") and pl >= 300:
+                    print_colored("=" * 60, Colors.GREEN)
+                    print_colored("MATCH FOUND! Loading...", Colors.GREEN)
+                    print_colored("=" * 60, Colors.GREEN)
+
+                    for tk in (team_coord_task, member_trigger_task):
+                        if tk and not tk.done():
+                            tk.cancel()
+                            try: await tk
+                            except asyncio.CancelledError: pass
+                    team_coord_task = None; member_trigger_task = None
+                    _team_active["flag"] = False
+
+                    try:
+                        res = json.loads(await decode_protobuf(hex_data[10:]))
+                        token = udp_key = match_code = server_ip_port = None
+                        match_account_id = block_val = None
+                        if '42' in res and 'data' in res['42']:
+                            match_code = res['42']['data']
+                        if '5' in res and 'data' in res['5']:
+                            r5 = res['5']['data']
+                            server_ip_port = r5.get('2', {}).get('data')
+                            udp_key = r5.get('3', {}).get('data')
+                            token = r5

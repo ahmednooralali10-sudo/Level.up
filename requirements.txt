@@ -6,3 +6,4 @@ google-play-scraper
 pycryptodome
 protobuf-decoder
 requests
+protobuf

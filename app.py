@@ -2278,4 +2278,205 @@ async def functional_battle_royale(addrs, starter_packet, account_region, client
                             r5 = res['5']['data']
                             server_ip_port = r5.get('2', {}).get('data')
                             udp_key = r5.get('3', {}).get('data')
-                            token = r5
+                            token = r5.get('4', {}).get('data')
+                            if '42' in r5: match_code = r5['42']['data']
+                        if '1' in res and 'data' in res['1']:
+                            match_account_id = res['1']['data']
+                        if '5' in res and 'data' in res['5']:
+                            block_val = res['5']['data'].get('1', {}).get('data')
+
+                        effective = match_account_id or account_id or "BD_BOT"
+                        if token and udp_key and match_code and server_ip_port:
+                            async with _team_state["lock"]:
+                                all_peers = list(_team_state["peers"].keys())
+                            if all_peers:
+                                await squad_sync.reset_match(all_peers)
+
+                            acc_tok = current_account_data.get('access_token', '') if current_account_data else ""
+                            thunder, sharma = await build_match_startup_packets(
+                                token, udp_key, match_code, effective, block_val or 0,
+                                server_ip=server_ip_port, region=account_region,
+                                client_version=client_version, access_token=acc_tok,
+                                mode_id=BR_MODE_ID, map_id=BR_MAP_ID)
+                            match_index = await _inc_match(uid_str)
+                            new_match = asyncio.create_task(play_game(
+                                server_ip_port, thunder, sharma, udp_key, match_code,
+                                effective, current_search_region, client_version,
+                                current_key, current_iv,
+                                match_index=match_index, on_match_complete=trigger_post_match_refresh))
+                            play_matches.append(new_match)
+                            try: await new_match
+                            except Exception as e: print_error(f"[MATCH #{match_index}] {e}")
+                            
+                            async with _team_state["lock"]:
+                                _team_state["peers"].pop(uid_str, None)
+                                if _team_state["leader_uid"] == uid_str:
+                                    _team_state["leader_uid"] = None
+                            await _team_member_leave(uid_str)
+                            
+                            try:
+                                if writer and not writer.is_closing():
+                                    writer.close()
+                                    await writer.wait_closed()
+                            except Exception: pass
+
+                            _team_active["flag"] = True
+                            await asyncio.sleep(NEW_MATCH_DELAY)
+                            break
+                    except Exception as e:
+                        print_error(f"[FUNC] Match parse error: {e}")
+                        break
+
+        except asyncio.CancelledError:
+            if gateway_ping_task: gateway_ping_task.cancel()
+            async with _team_state["lock"]:
+                _team_state["peers"].pop(uid_str, None)
+                if _team_state["leader_uid"] == uid_str:
+                    _team_state["leader_uid"] = None
+            await _team_member_leave(uid_str)
+            raise
+        except Exception as e:
+            if gateway_ping_task: gateway_ping_task.cancel()
+            print_error(f"[FUNC] TCP state {uid_str}: {e} - Reconnecting in 2s...")
+            if writer:
+                try: writer.close(); await writer.wait_closed()
+                except Exception: pass
+            reconnects += 1
+            await asyncio.sleep(2.0)
+        finally:
+            _team_active["flag"] = False
+            for tk in (team_coord_task, member_trigger_task):
+                if tk and not tk.done():
+                    tk.cancel()
+                    try: await tk
+                    except Exception: pass
+            if gateway_ping_task: gateway_ping_task.cancel()
+            if writer:
+                try: writer.close(); await writer.wait_closed()
+                except Exception: pass
+            async with _team_state["lock"]:
+                _team_state["peers"].pop(uid_str, None)
+                if _team_state["leader_uid"] == uid_str:
+                    _team_state["leader_uid"] = None
+            await _team_member_leave(uid_str)
+            _team_active["flag"] = True
+
+# ═══════════════════════════ WEB UI & ENDPOINTS ═══════════════════════════
+HTML_PAGE = """
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TEAM RBC BOT</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #0a0a12; color: #eee; font-family: system-ui, sans-serif; padding: 20px; min-height: 100vh; }
+  .card { background: #14141e; border: 1px solid #25253a; border-radius: 12px; padding: 24px; max-width: 600px; margin: 0 auto 20px; box-shadow: 0 4px 20px rgba(0,0,0,0.4); }
+  h1 { color: #8b5cf6; margin-bottom: 20px; text-align: center; font-size: 24px; }
+  .input-group { display: flex; flex-direction: column; gap: 12px; margin-bottom: 15px; }
+  input { background: #0a0a12; border: 1.5px solid #25253a; border-radius: 8px; padding: 12px 14px; color: #fff; outline: none; font-size: 14px; }
+  input:focus { border-color: #8b5cf6; }
+  button { background: linear-gradient(135deg, #8b5cf6, #ec4899); color: #fff; border: none; padding: 14px; border-radius: 8px; font-weight: bold; cursor: pointer; font-size: 14px; transition: 0.2s; }
+  button:hover { opacity: 0.9; transform: translateY(-1px); }
+  table { width: 100%; border-collapse: collapse; margin-top: 15px; font-size: 13px; }
+  th, td { padding: 10px; text-align: right; border-bottom: 1px solid #25253a; }
+  th { color: #aaa; font-weight: bold; }
+  .status-online { color: #10f098; font-weight: bold; }
+  .status-match { color: #f5b800; font-weight: bold; }
+  .status-wait { color: #aaa; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>TEAM RBC Bot</h1>
+    <div class="input-group">
+      <input type="text" id="uid" placeholder="UID (رقم الحساب)">
+      <input type="password" id="password" placeholder="الباسوورد">
+      <button onclick="addAccount()">🚀 إضافة وتشغيل البوت</button>
+    </div>
+    <div id="msg" style="text-align:center; margin-top:10px; font-weight:bold; font-size: 14px;"></div>
+  </div>
+  <div class="card">
+    <h2 style="font-size: 16px; margin-bottom: 10px; color: #8b5cf6;">الحسابات المشغلة حالياً</h2>
+    <table id="accTable">
+      <thead><tr><th>UID</th><th>الاسم</th><th>الحالة</th><th>المستوى</th><th>ماتشات</th></tr></thead>
+      <tbody><tr><td colspan="5" style="text-align:center;color:#aaa;">لا يوجد حسابات</td></tr></tbody>
+    </table>
+  </div>
+  <script>
+    async function addAccount() {
+      const uid = document.getElementById('uid').value.trim();
+      const pass = document.getElementById('password').value.trim();
+      const msg = document.getElementById('msg');
+      if(!uid || !pass) { msg.style.color = '#f43f5e'; msg.innerText = 'عبئ كل الحقول!'; return; }
+      msg.style.color = '#10f098'; msg.innerText = '⏳ جاري التشغيل...';
+      const fd = new FormData();
+      fd.append('uid', uid);
+      fd.append('password', pass);
+      try {
+        const r = await fetch('/add_account', {method: 'POST', body: fd});
+        const d = await r.json();
+        if(d.ok) { 
+            msg.innerText = '✅ تم إضافة الحساب للبوت بنجاح!'; 
+            document.getElementById('uid').value = ''; 
+            document.getElementById('password').value = ''; 
+        } else { 
+            msg.style.color = '#f43f5e'; 
+            msg.innerText = '❌ ' + d.error; 
+        }
+      } catch(e) { msg.style.color = '#f43f5e'; msg.innerText = '❌ خطأ في الاتصال'; }
+    }
+    async function updateTable() {
+      try {
+        const r = await fetch('/status');
+        const d = await r.json();
+        const tbody = document.querySelector('#accTable tbody');
+        if(Object.keys(d.accounts).length === 0) return;
+        tbody.innerHTML = '';
+        for(let uid in d.accounts) {
+          const acc = d.accounts[uid];
+          let statusClass = 'status-wait';
+          if(acc.status === 'ONLINE') statusClass = 'status-online';
+          if(acc.status === 'IN_MATCH') statusClass = 'status-match';
+          tbody.innerHTML += `<tr>
+            <td>${uid}</td>
+            <td>${acc.nickname || '-'}</td>
+            <td class="${statusClass}">${acc.status || 'WAITING'}</td>
+            <td>${acc.level || 1}</td>
+            <td>${acc.matches || 0}</td>
+          </tr>`;
+        }
+      } catch(e){}
+    }
+    setInterval(updateTable, 2000);
+  </script>
+</body>
+</html>
+"""
+
+app = FastAPI()
+
+@app.get("/")
+def index():
+    return HTMLResponse(HTML_PAGE)
+
+@app.post("/add_account")
+async def add_account_endpoint(uid: str = Form(...), password: str = Form(...)):
+    if not uid or not password:
+        return JSONResponse({"ok": False, "error": "Missing fields"})
+    
+    if uid in bot_state.account_workers and not bot_state.account_workers[uid].done():
+        return JSONResponse({"ok": False, "error": "Account already running"})
+        
+    task = asyncio.create_task(account_loop_guest(uid, password))
+    bot_state.account_workers[uid] = task
+    return JSONResponse({"ok": True})
+
+@app.get("/status")
+def get_status():
+    return JSONResponse({"accounts": bot_state.accounts})
+
+# ═══════════════════════════ ENTRY POINT ═══════════════════════════
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=WEB_PORT)

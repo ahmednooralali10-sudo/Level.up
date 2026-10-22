@@ -1,7 +1,8 @@
+fastapi
+uvicorn
+python-multipart
 httpx
 google-play-scraper
 pycryptodome
 protobuf-decoder
-protobuf
 requests
-aiohttp

@@ -2257,4 +2257,4 @@ async def functional_battle_royale(addrs, starter_packet, account_region, client
                             token = r5.get('4', {}).get('data')
                             if '42' in r5: match_code = r5['42']['data']
                         if '1' in res and 'data' in res['1']:
-                            match_account_id = res['1']['data
+                            match_account_id = res['1']['data']
